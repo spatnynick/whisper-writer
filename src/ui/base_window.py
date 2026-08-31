@@ -12,16 +12,16 @@ class BaseWindow(QMainWindow):
     # the painted card and its content occupy the inset SHADOW_MARGIN..(-SHADOW_MARGIN) rect.
     SHADOW_MARGIN = 16
 
-    def __init__(self, title, width, height):
+    def __init__(self, title, width, height, show_title_bar=True):
         """
         Initialize the base window.
         """
         super().__init__()
-        self.initUI(title, width, height)
+        self.initUI(title, width, height, show_title_bar)
         self.setWindowPosition()
         self.is_dragging = False
 
-    def initUI(self, title, width, height):
+    def initUI(self, title, width, height, show_title_bar=True):
         """
         Initialize the user interface.
         """
@@ -30,6 +30,10 @@ class BaseWindow(QMainWindow):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         margin = self.SHADOW_MARGIN
         self.setFixedSize(width + margin * 2, height + margin * 2)
+
+        # Corner radius for the painted "card" background; subclasses may override this
+        # (e.g. to height // 2 for a pill shape) any time before the first paint.
+        self.corner_radius = 16
 
         # Resolve theme colors from the active palette instead of hardcoding them.
         palette = self.palette()
@@ -56,49 +60,51 @@ class BaseWindow(QMainWindow):
         shadow.setColor(QColor(0, 0, 0, 120))
         self.main_widget.setGraphicsEffect(shadow)
 
-        # Create a widget for the title bar
-        title_bar = QWidget()
-        title_bar_layout = QHBoxLayout(title_bar)
-        title_bar_layout.setContentsMargins(0, 0, 0, 0)
+        if show_title_bar:
+            # Create a widget for the title bar
+            title_bar = QWidget()
+            title_bar_layout = QHBoxLayout(title_bar)
+            title_bar_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Add the title label
-        title_label = QLabel('WhisperWriter')
-        title_font = title_label.font()
-        title_font.setPointSize(12)
-        title_font.setBold(True)
-        title_label.setFont(title_font)
-        title_label.setAlignment(Qt.AlignCenter)
-        title_label.setStyleSheet(f"color: {self.text_color.name()};")
+            # Add the title label
+            title_label = QLabel('WhisperWriter')
+            title_font = title_label.font()
+            title_font.setPointSize(12)
+            title_font.setBold(True)
+            title_label.setFont(title_font)
+            title_label.setAlignment(Qt.AlignCenter)
+            title_label.setStyleSheet(f"color: {self.text_color.name()};")
 
-        # Create a widget for the close button
-        close_button_widget = QWidget()
-        close_button_layout = QHBoxLayout(close_button_widget)
-        close_button_layout.setContentsMargins(0, 0, 0, 0)
+            # Create a widget for the close button
+            close_button_widget = QWidget()
+            close_button_layout = QHBoxLayout(close_button_widget)
+            close_button_layout.setContentsMargins(0, 0, 0, 0)
 
-        close_button = QPushButton('×')
-        close_button.setFixedSize(25, 25)
-        close_button.setCursor(Qt.PointingHandCursor)
-        close_button.setStyleSheet(f"""
-            QPushButton {{
-                background-color: transparent;
-                border: none;
-                color: {self.text_color.name()};
-                font-size: 16px;
-            }}
-            QPushButton:hover {{
-                color: #e0483d;
-            }}
-        """)
-        close_button.clicked.connect(self.handleCloseButton)
+            close_button = QPushButton('×')
+            close_button.setFixedSize(25, 25)
+            close_button.setCursor(Qt.PointingHandCursor)
+            close_button.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: transparent;
+                    border: none;
+                    color: {self.text_color.name()};
+                    font-size: 16px;
+                }}
+                QPushButton:hover {{
+                    color: #e0483d;
+                }}
+            """)
+            close_button.clicked.connect(self.handleCloseButton)
 
-        close_button_layout.addWidget(close_button, alignment=Qt.AlignRight)
+            close_button_layout.addWidget(close_button, alignment=Qt.AlignRight)
 
-        # Add widgets to the title bar layout
-        title_bar_layout.addWidget(QWidget(), 1)  # Left spacer
-        title_bar_layout.addWidget(title_label, 3)  # Title (with more width)
-        title_bar_layout.addWidget(close_button_widget, 1)  # Close button
+            # Add widgets to the title bar layout
+            title_bar_layout.addWidget(QWidget(), 1)  # Left spacer
+            title_bar_layout.addWidget(title_label, 3)  # Title (with more width)
+            title_bar_layout.addWidget(close_button_widget, 1)  # Close button
 
-        self.main_layout.addWidget(title_bar)
+            self.main_layout.addWidget(title_bar)
+
         self.setCentralWidget(outer_widget)
 
         self.setStyleSheet(self._build_stylesheet())
@@ -259,7 +265,10 @@ class BaseWindow(QMainWindow):
         """
         margin = self.SHADOW_MARGIN
         path = QPainterPath()
-        path.addRoundedRect(QRectF(self.rect()).adjusted(margin, margin, -margin, -margin), 16, 16)
+        path.addRoundedRect(
+            QRectF(self.rect()).adjusted(margin, margin, -margin, -margin),
+            self.corner_radius, self.corner_radius
+        )
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setBrush(QBrush(self.card_color))
