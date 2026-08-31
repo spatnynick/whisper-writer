@@ -164,6 +164,13 @@ correctness fixes:
   `assets/icon-mic.svg`/`icon-pencil.svg` → `assets/microphone.png`/`pencil.png` — redesigned
   as solid-black flat silhouettes on transparent backgrounds (pure alpha masks), so the status
   popup can tint them at runtime to match the active theme instead of shipping fixed-color art.
+  The KDE desktop entry's `Icon=` should point directly at the tracked
+  `/opt/whisper-writer/assets/ww-logo.png` (absolute path), not an icon-theme name — an earlier
+  attempt copied it into `~/.local/share/icons/hicolor/...` and used `Icon=whisper-writer`,
+  which didn't reliably pick up a later icon update through KDE's icon-theme cache. Pointing at
+  the file directly means a future icon change only needs `git pull` +
+  `kbuildsycoca5 --noincremental`, no re-copy step, and it works the same way on every machine
+  that clones this fork since the icon travels with the repo.
 - **`src/ui/base_window.py` now follows the active KDE/Qt palette** instead of a hardcoded
   white background + `#404040` text — `self.card_color`/`text_color`/`accent_color` are
   resolved from `QPalette.Window`/`WindowText`/`Highlight`, so every window automatically
