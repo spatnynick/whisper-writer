@@ -184,5 +184,14 @@ class WhisperWriterApp(QObject):
 
 
 if __name__ == '__main__':
+    import argparse
+    from logging_setup import configure_logging
+
+    parser = argparse.ArgumentParser(description='WhisperWriter')
+    parser.add_argument('--debug', action='store_true', help='Enable debug logging to ~/.cache/whisper-writer/debug.log')
+    args = parser.parse_args()
+
+    configure_logging(args.debug)
+
     app = WhisperWriterApp()
     app.run()

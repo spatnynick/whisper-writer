@@ -1,11 +1,15 @@
 import io
+import logging
 import os
+import time
 import numpy as np
 import soundfile as sf
 from faster_whisper import WhisperModel
 from openai import OpenAI
 
 from utils import ConfigManager
+
+logger = logging.getLogger(__name__)
 
 def create_local_model():
     """
@@ -79,6 +83,7 @@ def transcribe_api(audio_data):
     sf.write(byte_io, audio_data, sample_rate, format='wav')
     byte_io.seek(0)
 
+    start = time.time()
     response = client.audio.transcriptions.create(
         model=model_options['api']['model'],
         file=('audio.wav', byte_io, 'audio/wav'),
@@ -86,6 +91,7 @@ def transcribe_api(audio_data):
         prompt=model_options['common']['initial_prompt'],
         temperature=model_options['common']['temperature'],
     )
+    logger.debug(f"transcribe_api: HTTP call took {time.time() - start:.3f}s")
     return response.text
 
 def post_process_transcription(transcription):

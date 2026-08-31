@@ -2,9 +2,12 @@ import subprocess
 import os
 import signal
 import time
+import logging
 from pynput.keyboard import Controller as PynputController
 
 from utils import ConfigManager
+
+logger = logging.getLogger(__name__)
 
 def run_command_or_exit_on_failure(command):
     """
@@ -59,12 +62,15 @@ class InputSimulator:
             text (str): The text to type.
         """
         interval = ConfigManager.get_config_value('post_processing', 'writing_key_press_delay')
+        logger.debug(f"typewrite: method={self.input_method} interval={interval} chars={len(text)}")
+        start = time.time()
         if self.input_method == 'pynput':
             self._typewrite_pynput(text, interval)
         elif self.input_method == 'ydotool':
             self._typewrite_ydotool(text, interval)
         elif self.input_method == 'dotool':
             self._typewrite_dotool(text, interval)
+        logger.debug(f"typewrite: completed in {time.time() - start:.3f}s")
 
     def _typewrite_pynput(self, text, interval):
         """

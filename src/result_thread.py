@@ -1,3 +1,4 @@
+import logging
 import time
 import traceback
 import numpy as np
@@ -11,6 +12,8 @@ from threading import Event
 
 from transcription import transcribe
 from utils import ConfigManager
+
+logger = logging.getLogger(__name__)
 
 
 class ResultThread(QThread):
@@ -71,6 +74,7 @@ class ResultThread(QThread):
 
             self.statusSignal.emit('recording')
             ConfigManager.console_print('Recording...')
+            logger.debug('Recording started')
             audio_data = self._record_audio()
 
             if not self.is_running:
@@ -82,6 +86,7 @@ class ResultThread(QThread):
 
             self.statusSignal.emit('transcribing')
             ConfigManager.console_print('Transcribing...')
+            logger.debug('Transcription started')
 
             # Time the transcription process
             start_time = time.time()
@@ -90,6 +95,7 @@ class ResultThread(QThread):
 
             transcription_time = end_time - start_time
             ConfigManager.console_print(f'Transcription completed in {transcription_time:.2f} seconds. Post-processed line: {result}')
+            logger.debug(f'Transcription completed in {transcription_time:.2f}s. Result length: {len(result)} chars')
 
             if not self.is_running:
                 return
@@ -148,6 +154,7 @@ class ResultThread(QThread):
                                  input=True, frames_per_buffer=frame_size,
                                  input_device_index=sound_device,
                                  stream_callback=audio_callback)
+            logger.debug(f"Audio stream opened: sample_rate={self.sample_rate} device={sound_device} recording_mode={recording_mode}")
             try:
                 while self.is_running and self.is_recording:
                     data_ready.wait()
@@ -180,6 +187,7 @@ class ResultThread(QThread):
             finally:
                 stream.stop_stream()
                 stream.close()
+                logger.debug("Audio stream closed")
         finally:
             audio.terminate()
 
@@ -187,11 +195,13 @@ class ResultThread(QThread):
         duration = len(audio_data) / self.sample_rate
 
         ConfigManager.console_print(f'Recording finished. Size: {audio_data.size} samples, Duration: {duration:.2f} seconds')
+        logger.debug(f'Recording finished. Size: {audio_data.size} samples, Duration: {duration:.2f}s')
 
         min_duration_ms = recording_options.get('min_duration') or 100
 
         if (duration * 1000) < min_duration_ms:
             ConfigManager.console_print(f'Discarded due to being too short.')
+            logger.debug(f'Recording discarded: duration {duration*1000:.0f}ms < min_duration {min_duration_ms}ms')
             return None
 
         return audio_data

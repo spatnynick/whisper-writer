@@ -1,8 +1,11 @@
+import logging
 from abc import ABC, abstractmethod
 from enum import Enum, auto
 from typing import Callable, Optional, Set
 
 from utils import ConfigManager
+
+logger = logging.getLogger(__name__)
 
 
 class InputEvent(Enum):
@@ -400,13 +403,16 @@ class KeyListener:
             return
 
         key, event_type = event
+        logger.debug(f"key event: {key} {event_type}")
 
         was_active = self.key_chord.is_active()
         is_active = self.key_chord.update(key, event_type)
 
         if not was_active and is_active:
+            logger.debug("key event: activation chord became active, triggering on_activate")
             self._trigger_callbacks("on_activate")
         elif was_active and not is_active:
+            logger.debug("key event: activation chord became inactive, triggering on_deactivate")
             self._trigger_callbacks("on_deactivate")
 
     def add_callback(self, event: str, callback: Callable):
