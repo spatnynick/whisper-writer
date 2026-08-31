@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from enum import Enum, auto
-from typing import Callable, Set
+from typing import Callable, Optional, Set
 
 from utils import ConfigManager
 
@@ -262,13 +262,19 @@ class KeyChord:
         return self.is_active()
 
     def is_active(self) -> bool:
-        """Check if all keys in the chord are currently pressed."""
+        """Check if exactly the keys in the chord are currently pressed (no extras)."""
+        allowed_keys = set()
         for key in self.keys:
             if isinstance(key, frozenset):
                 if not any(k in self.pressed_keys for k in key):
                     return False
-            elif key not in self.pressed_keys:
-                return False
+                allowed_keys.update(key)
+            else:
+                if key not in self.pressed_keys:
+                    return False
+                allowed_keys.add(key)
+        if not self.pressed_keys.issubset(allowed_keys):
+            return False
         return True
 
 class KeyListener:
@@ -788,27 +794,37 @@ class PynputBackend(InputBackend):
             self.mouse_listener.stop()
             self.mouse_listener = None
 
-    def _translate_key_event(self, native_event) -> tuple[KeyCode, InputEvent]:
+    def _translate_key_event(self, native_event) -> tuple[Optional[KeyCode], InputEvent]:
         """Translate a pynput event to our internal event representation."""
         pynput_key, is_press = native_event
-        key_code = self.key_map.get(pynput_key, KeyCode.SPACE)
+        key_code = self.key_map.get(pynput_key)
+        if key_code is None:
+            # Shift (and other modifiers) change the reported char (e.g. 'r' -> 'R'),
+            # so a shifted letter/number/symbol key won't match the lowercase map entry
+            # by identity. Retry with the char lowercased before giving up.
+            char = getattr(pynput_key, 'char', None)
+            if char and char.lower() != char:
+                key_code = self.key_map.get(self.keyboard.KeyCode.from_char(char.lower()))
         event_type = InputEvent.KEY_PRESS if is_press else InputEvent.KEY_RELEASE
         return key_code, event_type
 
     def _on_keyboard_press(self, key):
         """Handle keyboard press events."""
-        translated_event = self._translate_key_event((key, True))
-        self.on_input_event(translated_event)
+        key_code, event_type = self._translate_key_event((key, True))
+        if key_code is not None:
+            self.on_input_event((key_code, event_type))
 
     def _on_keyboard_release(self, key):
         """Handle keyboard release events."""
-        translated_event = self._translate_key_event((key, False))
-        self.on_input_event(translated_event)
+        key_code, event_type = self._translate_key_event((key, False))
+        if key_code is not None:
+            self.on_input_event((key_code, event_type))
 
     def _on_mouse_click(self, x, y, button, pressed):
         """Handle mouse click events."""
-        translated_event = self._translate_key_event((button, pressed))
-        self.on_input_event(translated_event)
+        key_code, event_type = self._translate_key_event((button, pressed))
+        if key_code is not None:
+            self.on_input_event((key_code, event_type))
 
     def _create_key_map(self):
         """Create a mapping from pynput keys to our internal KeyCode enum."""
