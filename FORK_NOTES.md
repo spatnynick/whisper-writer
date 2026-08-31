@@ -275,6 +275,18 @@ were already duplicated in the tray menu. Removed entirely:
   lifetime, not window count. If any future window is added and shown persistently, re-check
   this still behaves as intended.
 
+## Status popup: colored border for recording/transcribing (2026-08-31)
+
+The pill was too subtle to notice out of the corner of your eye. `BaseWindow` now supports an
+optional colored ring around its painted "card" (`self.border_color: QColor|None`,
+`self.border_width`, default `None`/off — generic, any frameless subclass can use it, drawn as
+a `QPen` stroke on the same rounded-rect `QPainterPath` used for the fill). `StatusWindow` sets
+it per status: red (`#E53935`) while recording, amber (`#F59E0B`) while transcribing — the same
+hex values as the tray icon's status glyphs (`ww-logo-recording.svg`/`ww-logo-transcribing.svg`),
+so the popup and tray icon read as one consistent status language rather than introducing a
+second color scheme. Remember to call `self.update()` after changing `border_color` — the window
+may already be visible (recording → transcribing) rather than freshly shown.
+
 ## Settings: only nag/restart when something that needs it actually changed (2026-08-31)
 
 Two separate annoyances, same root cause — the Settings window used to treat every close/save
