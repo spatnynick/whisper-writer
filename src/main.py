@@ -63,6 +63,9 @@ class WhisperWriterApp(QObject):
         # immediately after play(block=False) returns — before any audio is actually output.
         self.recording_start_sound = AudioPlayer(os.path.join('assets', 'recording-start.wav'))
         self.recording_stop_sound = AudioPlayer(os.path.join('assets', 'recording-stop.wav'))
+        toggle_volume = ConfigManager.get_config_value('misc', 'toggle_sound_volume')
+        self.recording_start_sound.volume = toggle_volume
+        self.recording_stop_sound.volume = toggle_volume
 
         self.main_window = MainWindow()
         self.main_window.openSettings.connect(self.settings_window.show)
