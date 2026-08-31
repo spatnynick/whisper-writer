@@ -226,7 +226,12 @@ If pulling in upstream changes later (below), these three are already covered �
 
 - Two short tones now play on the recording start/stop toggle (not on transcription
   completion — that's still `misc.noise_on_completion`), matching a feature OpenWhispr had.
-  Toggle with `misc.play_toggle_sounds` (default on).
+  Toggle with `misc.play_toggle_sounds` (default on). **Gotcha:** `AudioPlayer(...).play(block=False)`
+  on a throwaway object produces no audio at all — its GStreamer pipeline is torn down by
+  Python's GC before playback starts, since nothing holds a reference once play() returns.
+  Fixed by keeping `self.recording_start_sound`/`self.recording_stop_sound` as persistent
+  instance attributes, reused across every toggle. If adding another non-blocking sound
+  anywhere in this app, reuse this pattern rather than a fresh `AudioPlayer(...)` per call.
 - Settings window switched to a normal, non-transparent, native-look top-level window instead
   of the frameless "card" style — `BaseWindow` now takes a `frameless=True/False` switch; only
   `SettingsWindow` opts out (`MainWindow`/`StatusWindow` are unaffected, still frameless cards).
