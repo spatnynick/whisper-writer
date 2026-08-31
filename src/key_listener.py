@@ -287,6 +287,7 @@ class KeyListener:
         self.backends = []
         self.active_backend = None
         self.key_chord = None
+        self._listening = False
         self.callbacks = {
             "on_activate": [],
             "on_deactivate": []
@@ -347,8 +348,11 @@ class KeyListener:
 
     def start(self):
         """Start the active backend."""
+        if self._listening:
+            return
         if self.active_backend:
             self.active_backend.start()
+            self._listening = True
         else:
             raise RuntimeError("No active backend selected")
 
@@ -356,6 +360,7 @@ class KeyListener:
         """Stop the active backend."""
         if self.active_backend:
             self.active_backend.stop()
+        self._listening = False
 
     def load_activation_keys(self):
         """Load activation keys from configuration."""
