@@ -55,6 +55,7 @@ class WhisperWriterApp(QObject):
 
         self.result_thread = None
         self.current_status = 'idle'
+        self.last_transcript = None
 
         self.main_window = MainWindow()
         self.main_window.openSettings.connect(self.settings_window.show)
@@ -88,6 +89,15 @@ class WhisperWriterApp(QObject):
         settings_action.triggered.connect(self.settings_window.show)
         tray_menu.addAction(settings_action)
 
+        tray_menu.addSeparator()
+
+        self.copy_last_transcript_action = QAction('Copy Last Transcript', self.app)
+        self.copy_last_transcript_action.setEnabled(False)
+        self.copy_last_transcript_action.triggered.connect(self.copy_last_transcript)
+        tray_menu.addAction(self.copy_last_transcript_action)
+
+        tray_menu.addSeparator()
+
         exit_action = QAction('Exit', self.app)
         exit_action.triggered.connect(self.exit_app)
         tray_menu.addAction(exit_action)
@@ -112,6 +122,23 @@ class WhisperWriterApp(QObject):
         elif status in ('idle', 'error', 'cancel'):
             self.tray_icon.setIcon(self.tray_icon_idle)
             self.tray_icon.setToolTip('WhisperWriter — Idle')
+
+    def copy_last_transcript(self):
+        """
+        Copy the last transcript to the clipboard. Only happens when the user explicitly
+        clicks this tray menu item — the app never touches the clipboard on its own.
+        """
+        if not self.last_transcript:
+            self.tray_icon.showMessage(
+                'WhisperWriter', 'No transcript captured yet.',
+                QSystemTrayIcon.Information, 3000
+            )
+            return
+        self.app.clipboard().setText(self.last_transcript)
+        self.tray_icon.showMessage(
+            'WhisperWriter', 'Last transcript copied to clipboard.',
+            QSystemTrayIcon.Information, 2000
+        )
 
     def cleanup(self):
         if self.key_listener:
@@ -214,6 +241,9 @@ class WhisperWriterApp(QObject):
         """
         When the transcription is complete, type the result and start listening for the activation key again.
         """
+        self.last_transcript = result
+        self.copy_last_transcript_action.setEnabled(bool(result))
+
         self.input_simulator.typewrite(result)
 
         if ConfigManager.get_config_value('misc', 'noise_on_completion'):
