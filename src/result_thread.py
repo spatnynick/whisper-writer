@@ -45,12 +45,20 @@ class ResultThread(QThread):
         self.local_model = local_model
         self.is_recording = False
         self.is_running = True
+        self.is_cancelled = False
         self.sample_rate = None
         self.mutex = QMutex()
 
     def stop_recording(self):
         """Stop the current recording session."""
         self.mutex.lock()
+        self.is_recording = False
+        self.mutex.unlock()
+
+    def cancel_recording(self):
+        """Cancel the current recording: stop capturing and discard whatever was recorded."""
+        self.mutex.lock()
+        self.is_cancelled = True
         self.is_recording = False
         self.mutex.unlock()
 
@@ -78,6 +86,12 @@ class ResultThread(QThread):
             audio_data = self._record_audio()
 
             if not self.is_running:
+                return
+
+            if self.is_cancelled:
+                ConfigManager.console_print('Recording cancelled.')
+                logger.debug('Recording cancelled.')
+                self.statusSignal.emit('cancel')
                 return
 
             if audio_data is None:

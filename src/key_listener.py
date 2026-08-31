@@ -293,7 +293,8 @@ class KeyListener:
         self._listening = False
         self.callbacks = {
             "on_activate": [],
-            "on_deactivate": []
+            "on_deactivate": [],
+            "on_cancel_key": []
         }
         self.load_activation_keys()
         self.initialize_backends()
@@ -399,11 +400,14 @@ class KeyListener:
 
     def on_input_event(self, event):
         """Handle input events and trigger callbacks if the key chord becomes active or inactive."""
-        if not self.key_chord or not self.active_backend:
-            return
-
         key, event_type = event
         logger.debug(f"key event: {key} {event_type}")
+
+        if key == KeyCode.ESC and event_type == InputEvent.KEY_PRESS:
+            self._trigger_callbacks("on_cancel_key")
+
+        if not self.key_chord or not self.active_backend:
+            return
 
         was_active = self.key_chord.is_active()
         is_active = self.key_chord.update(key, event_type)

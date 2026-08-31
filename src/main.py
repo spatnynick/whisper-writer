@@ -47,12 +47,14 @@ class WhisperWriterApp(QObject):
         self.key_listener = KeyListener()
         self.key_listener.add_callback("on_activate", self.on_activation)
         self.key_listener.add_callback("on_deactivate", self.on_deactivation)
+        self.key_listener.add_callback("on_cancel_key", self.on_cancel_key)
 
         model_options = ConfigManager.get_config_section('model_options')
         model_path = model_options.get('local', {}).get('model_path')
         self.local_model = create_local_model() if not model_options.get('use_api') else None
 
         self.result_thread = None
+        self.current_status = 'idle'
 
         self.main_window = MainWindow()
         self.main_window.openSettings.connect(self.settings_window.show)
@@ -172,6 +174,7 @@ class WhisperWriterApp(QObject):
             self.result_thread.statusSignal.connect(self.status_window.updateStatus)
             self.status_window.closeSignal.connect(self.stop_result_thread)
         self.result_thread.statusSignal.connect(self.update_tray_icon)
+        self.result_thread.statusSignal.connect(self.on_status_changed)
         self.result_thread.resultSignal.connect(self.on_transcription_complete)
         self.result_thread.start()
 
@@ -181,6 +184,27 @@ class WhisperWriterApp(QObject):
         """
         if self.result_thread and self.result_thread.isRunning():
             self.result_thread.stop()
+
+    def on_status_changed(self, status):
+        """
+        Track the current recording/transcription status (used to gate the cancel hotkey),
+        and re-arm listening after a cancelled recording (which, unlike a normal completed
+        recording, never reaches on_transcription_complete since nothing was transcribed).
+        """
+        self.current_status = status
+        if status == 'cancel':
+            if ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous':
+                self.start_result_thread()
+            else:
+                self.key_listener.start()
+
+    def on_cancel_key(self):
+        """
+        Called on every ESC press; only actually cancels if a recording is currently
+        in progress (not while transcribing, not while idle).
+        """
+        if self.result_thread and self.result_thread.isRunning() and self.current_status == 'recording':
+            self.result_thread.cancel_recording()
 
     def on_transcription_complete(self, result):
         """
