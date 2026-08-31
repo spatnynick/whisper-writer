@@ -12,11 +12,12 @@ class BaseWindow(QMainWindow):
     # the painted card and its content occupy the inset SHADOW_MARGIN..(-SHADOW_MARGIN) rect.
     SHADOW_MARGIN = 16
 
-    def __init__(self, title, width, height, show_title_bar=True):
+    def __init__(self, title, width, height, show_title_bar=True, frameless=True):
         """
         Initialize the base window.
         """
         super().__init__()
+        self.frameless = frameless
         self.initUI(title, width, height, show_title_bar)
         self.setWindowPosition()
         self.is_dragging = False
@@ -24,8 +25,21 @@ class BaseWindow(QMainWindow):
     def initUI(self, title, width, height, show_title_bar=True):
         """
         Initialize the user interface.
+
+        When self.frameless is False, this is a normal top-level window with the platform's
+        native title bar/border and no custom painting or transparency — used by windows that
+        should look like a standard Qt application window (e.g. Settings) rather than the
+        frameless "card" look used elsewhere (main window, status popup).
         """
         self.setWindowTitle(title)
+
+        if not self.frameless:
+            self.resize(width, height)
+            self.setCentralWidget(QWidget(self))
+            self.main_widget = self.centralWidget()
+            self.main_layout = QVBoxLayout(self.main_widget)
+            return
+
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         margin = self.SHADOW_MARGIN
@@ -237,7 +251,11 @@ class BaseWindow(QMainWindow):
     def mousePressEvent(self, event):
         """
         Allow the window to be moved by clicking and dragging anywhere on the window.
+        Only applies to frameless windows, which have no native title bar to drag by.
         """
+        if not self.frameless:
+            super().mousePressEvent(event)
+            return
         if event.button() == Qt.LeftButton:
             self.is_dragging = True
             self.start_position = event.globalPos() - self.frameGeometry().topLeft()
@@ -247,6 +265,9 @@ class BaseWindow(QMainWindow):
         """
         Move the window when dragging.
         """
+        if not self.frameless:
+            super().mouseMoveEvent(event)
+            return
         if Qt.LeftButton and self.is_dragging:
             self.move(event.globalPos() - self.start_position)
             event.accept()
@@ -255,14 +276,21 @@ class BaseWindow(QMainWindow):
         """
         Stop dragging the window.
         """
+        if not self.frameless:
+            super().mouseReleaseEvent(event)
+            return
         self.is_dragging = False
 
     def paintEvent(self, event):
         """
         Paint a rounded "card" background (derived from the active palette), inset from the
         window's edges by SHADOW_MARGIN so the QGraphicsDropShadowEffect on main_widget has
-        transparent space around the card to render its shadow into.
+        transparent space around the card to render its shadow into. Frameless windows only —
+        a standard window (frameless=False) uses the platform's normal opaque background.
         """
+        if not self.frameless:
+            super().paintEvent(event)
+            return
         margin = self.SHADOW_MARGIN
         path = QPainterPath()
         path.addRoundedRect(

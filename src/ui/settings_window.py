@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 from dotenv import set_key, load_dotenv
 from PyQt5.QtWidgets import (
@@ -6,6 +7,7 @@ from PyQt5.QtWidgets import (
     QMessageBox, QTabWidget, QWidget, QSizePolicy, QSpacerItem, QToolButton, QStyle, QFileDialog
 )
 from PyQt5.QtCore import Qt, QCoreApplication, QProcess, pyqtSignal
+from PyQt5.QtGui import QIcon
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from ui.base_window import BaseWindow
@@ -19,7 +21,8 @@ class SettingsWindow(BaseWindow):
 
     def __init__(self):
         """Initialize the settings window."""
-        super().__init__('Settings', 700, 700)
+        super().__init__('Settings', 700, 700, frameless=False)
+        self.setWindowIcon(QIcon(os.path.join('assets', 'ww-logo.png')))
         self.schema = ConfigManager.get_schema()
         self.init_settings_ui()
 
@@ -29,6 +32,7 @@ class SettingsWindow(BaseWindow):
         self.main_layout.addWidget(self.tabs)
 
         self.create_tabs()
+        self.create_about_tab()
         self.create_buttons()
 
         # Connect the use_api checkbox state change
@@ -48,6 +52,79 @@ class SettingsWindow(BaseWindow):
             self.create_settings_widgets(tab_layout, category, settings)
             tab_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
 
+    def create_about_tab(self):
+        """Create an About tab showing this fork's identity and version, read live from git
+        (never hardcoded) so it stays correct if the remote or fork owner ever changes."""
+        tab = QWidget()
+        layout = QVBoxLayout()
+        layout.setAlignment(Qt.AlignTop)
+        layout.setSpacing(10)
+        tab.setLayout(layout)
+        self.tabs.addTab(tab, 'About')
+
+        title = QLabel('WhisperWriter')
+        title_font = title.font()
+        title_font.setPointSize(16)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        layout.addWidget(title)
+
+        commit_hash = self.git_info(['rev-parse', '--short', 'HEAD'])
+        commit_date = self.git_info(['log', '-1', '--format=%cd', '--date=format:%Y-%m-%d %H:%M'])
+        ahead_count = self.git_info(['rev-list', '--count', 'upstream/main..HEAD'])
+        version_text = f"commit {commit_hash}" if commit_hash else "commit: unknown"
+        if commit_date:
+            version_text += f" ({commit_date})"
+        if ahead_count and ahead_count.isdigit():
+            version_text += f" — {ahead_count} commit(s) ahead of upstream"
+        layout.addWidget(QLabel(version_text))
+
+        origin_url = self.github_web_url(self.git_info(['remote', 'get-url', 'origin']))
+        if origin_url:
+            fork_label = QLabel(f'This fork: <a href="{origin_url}">{origin_url}</a>')
+            fork_label.setOpenExternalLinks(True)
+            fork_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+            layout.addWidget(fork_label)
+        else:
+            layout.addWidget(QLabel('This fork: (no "origin" git remote found)'))
+
+        upstream_url = self.github_web_url(self.git_info(['remote', 'get-url', 'upstream']))
+        if upstream_url:
+            upstream_label = QLabel(f'Forked from (upstream): <a href="{upstream_url}">{upstream_url}</a>')
+            upstream_label.setOpenExternalLinks(True)
+            upstream_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+            layout.addWidget(upstream_label)
+
+        layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
+
+    def git_info(self, args):
+        """Run a git command against this repo's root and return its stripped stdout, or None
+        if git isn't available, this isn't a git checkout, or the command fails (e.g. no
+        "upstream" remote configured, or upstream/main isn't fetched locally)."""
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+        try:
+            result = subprocess.run(
+                ['git'] + args, cwd=repo_root, capture_output=True, text=True, timeout=3
+            )
+        except (FileNotFoundError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+
+    def github_web_url(self, remote_url):
+        """Normalize a git remote URL (SSH or HTTPS) into a clickable GitHub web URL."""
+        if not remote_url:
+            return None
+        url = remote_url.strip()
+        if url.endswith('.git'):
+            url = url[:-4]
+        if url.startswith('git@github.com:'):
+            url = 'https://github.com/' + url[len('git@github.com:'):]
+        elif not (url.startswith('https://github.com/') or url.startswith('http://github.com/')):
+            return None
+        return url
+
     def create_settings_widgets(self, layout, category, settings):
         """Create widgets for each setting in a category."""
         for sub_category, sub_settings in settings.items():
@@ -58,14 +135,20 @@ class SettingsWindow(BaseWindow):
                     self.add_setting_widget(layout, key, meta, category, sub_category)
 
     def create_buttons(self):
-        """Create reset and save buttons."""
-        reset_button = QPushButton('Reset to saved settings')
+        """Create reset and save buttons, side by side on one line."""
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+
+        reset_button = QPushButton('Reset')
+        reset_button.setToolTip('Discard unsaved changes and reload the last saved settings')
         reset_button.clicked.connect(self.reset_settings)
-        self.main_layout.addWidget(reset_button)
+        button_row.addWidget(reset_button)
 
         save_button = QPushButton('Save')
         save_button.clicked.connect(self.save_settings)
-        self.main_layout.addWidget(save_button)
+        button_row.addWidget(save_button)
+
+        self.main_layout.addLayout(button_row)
 
     def add_setting_widget(self, layout, key, meta, category, sub_category=None):
         """Add a setting widget to the layout."""
