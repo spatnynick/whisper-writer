@@ -76,6 +76,7 @@ class WhisperWriterApp(QObject):
         self.tray_icon_transcribing = QIcon(os.path.join('assets', 'ww-logo-transcribing.png'))
 
         self.tray_icon = QSystemTrayIcon(self.tray_icon_idle, self.app)
+        self.tray_icon.setToolTip('WhisperWriter — Idle')
 
         tray_menu = QMenu()
 
@@ -104,10 +105,13 @@ class WhisperWriterApp(QObject):
 
         if status == 'recording':
             self.tray_icon.setIcon(self.tray_icon_recording)
+            self.tray_icon.setToolTip('WhisperWriter — Recording...')
         elif status == 'transcribing':
             self.tray_icon.setIcon(self.tray_icon_transcribing)
+            self.tray_icon.setToolTip('WhisperWriter — Transcribing...')
         elif status in ('idle', 'error', 'cancel'):
             self.tray_icon.setIcon(self.tray_icon_idle)
+            self.tray_icon.setToolTip('WhisperWriter — Idle')
 
     def cleanup(self):
         if self.key_listener:
