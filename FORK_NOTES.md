@@ -232,6 +232,9 @@ If pulling in upstream changes later (below), these three are already covered �
   Fixed by keeping `self.recording_start_sound`/`self.recording_stop_sound` as persistent
   instance attributes, reused across every toggle. If adding another non-blocking sound
   anywhere in this app, reuse this pattern rather than a fresh `AudioPlayer(...)` per call.
+  Loudness is a real Settings option (`misc.toggle_sound_volume`, 0-100, default 15) applied via
+  `AudioPlayer.volume`, not baked into the WAV amplitude — after two rounds of "still too loud"
+  from re-baking the files, this needed to be a runtime knob instead.
 - Settings window switched to a normal, non-transparent, native-look top-level window instead
   of the frameless "card" style — `BaseWindow` now takes a `frameless=True/False` switch; only
   `SettingsWindow` opts out (`MainWindow`/`StatusWindow` are unaffected, still frameless cards).
