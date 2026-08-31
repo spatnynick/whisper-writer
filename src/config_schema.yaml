@@ -186,6 +186,6 @@ misc:
     type: bool
     description: "Play a short sound when recording starts and another when it stops (independent of misc.noise_on_completion, which plays after transcription is typed out)."
   toggle_sound_volume:
-    value: 15
+    value: 25
     type: int
     description: "Volume (0-100) of the recording start/stop toggle sounds."
