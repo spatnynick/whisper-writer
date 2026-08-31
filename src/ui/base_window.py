@@ -1,5 +1,5 @@
 from PyQt5.QtCore import Qt, QRectF
-from PyQt5.QtGui import QPainter, QBrush, QColor, QPainterPath, QGuiApplication, QPalette
+from PyQt5.QtGui import QPainter, QBrush, QColor, QPainterPath, QGuiApplication, QPalette, QPen
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QMainWindow,
     QGraphicsDropShadowEffect
@@ -48,6 +48,13 @@ class BaseWindow(QMainWindow):
         # Corner radius for the painted "card" background; subclasses may override this
         # (e.g. to height // 2 for a pill shape) any time before the first paint.
         self.corner_radius = 16
+
+        # Optional colored ring around the card, off by default. A subclass can set
+        # self.border_color (QColor or None) and self.border_width any time, then call
+        # self.update() to repaint — used by StatusWindow to make the popup's current state
+        # (recording/transcribing) readable at a glance, not just via the small icon.
+        self.border_color = None
+        self.border_width = 3
 
         # Resolve theme colors from the active palette instead of hardcoding them.
         palette = self.palette()
@@ -300,5 +307,8 @@ class BaseWindow(QMainWindow):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setBrush(QBrush(self.card_color))
-        painter.setPen(Qt.NoPen)
+        if self.border_color is not None:
+            painter.setPen(QPen(self.border_color, self.border_width))
+        else:
+            painter.setPen(Qt.NoPen)
         painter.drawPath(path)

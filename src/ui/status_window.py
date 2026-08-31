@@ -2,7 +2,7 @@ import sys
 import os
 import time
 from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer
-from PyQt5.QtGui import QPixmap, QIcon, QPainter
+from PyQt5.QtGui import QPixmap, QIcon, QPainter, QColor
 from PyQt5.QtWidgets import QApplication, QLabel, QHBoxLayout
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -19,6 +19,10 @@ class StatusWindow(BaseWindow):
         """
         super().__init__('', 200, 56, show_title_bar=False)
         self.corner_radius = 28  # height // 2, for a full pill shape
+        # Same colors as the tray icon's recording/transcribing glyphs (ww-logo-*.svg), so the
+        # popup's border reads as the same status language rather than a new one.
+        self.recording_border_color = QColor('#E53935')
+        self.transcribing_border_color = QColor('#F59E0B')
         self.initStatusUI()
         self.statusSignal.connect(self.updateStatus)
 
@@ -162,12 +166,16 @@ class StatusWindow(BaseWindow):
         if status == 'recording':
             self.status_label.setText('Recording...')
             self._startPulse(self.microphone_pixmap, period=0.9)
+            self.border_color = self.recording_border_color
+            self.update()
             self.show()
         elif status == 'transcribing':
             self.status_label.setText('Transcribing...')
             # Slightly slower period than recording, to read as "processing" rather
             # than the more urgent recording pulse.
             self._startPulse(self.pencil_pixmap, period=1.4)
+            self.border_color = self.transcribing_border_color
+            self.update()
 
         if status in ('idle', 'error', 'cancel'):
             self._stopPulse()
