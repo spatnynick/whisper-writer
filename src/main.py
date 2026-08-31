@@ -24,6 +24,10 @@ class WhisperWriterApp(QObject):
         super().__init__()
         self.app = QApplication(sys.argv)
         self.app.setWindowIcon(QIcon(os.path.join('assets', 'ww-logo.png')))
+        # The app is tray-only now (no permanently-open main window) — without this, Qt quits
+        # the whole app as soon as Settings (the only window shown by default) is closed, since
+        # by default it counts as "the last window". The tray icon should control lifetime.
+        self.app.setQuitOnLastWindowClosed(False)
 
         ConfigManager.initialize()
 
