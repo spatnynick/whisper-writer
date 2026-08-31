@@ -5,11 +5,10 @@ from audioplayer import AudioPlayer
 from pynput.keyboard import Controller
 from PyQt5.QtCore import QObject, QProcess
 from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QAction, QMessageBox
+from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QAction, QMessageBox, QStyle
 
 from key_listener import KeyListener
 from result_thread import ResultThread
-from ui.main_window import MainWindow
 from ui.settings_window import SettingsWindow
 from ui.status_window import StatusWindow
 from transcription import create_local_model
@@ -31,6 +30,7 @@ class WhisperWriterApp(QObject):
         self.settings_window = SettingsWindow()
         self.settings_window.settings_closed.connect(self.on_settings_closed)
         self.settings_window.settings_saved.connect(self.restart_app)
+        self.settings_window.settings_saved_live.connect(self.apply_live_settings)
 
         if ConfigManager.config_file_exists():
             self.initialize_components()
@@ -67,16 +67,16 @@ class WhisperWriterApp(QObject):
         self.recording_start_sound.volume = toggle_volume
         self.recording_stop_sound.volume = toggle_volume
 
-        self.main_window = MainWindow()
-        self.main_window.openSettings.connect(self.settings_window.show)
-        self.main_window.startListening.connect(self.key_listener.start)
-        self.main_window.closeApp.connect(self.exit_app)
-
         if not ConfigManager.get_config_value('misc', 'hide_status_window'):
             self.status_window = StatusWindow()
 
         self.create_tray_icon()
         self.key_listener.start()
+
+        # Only safe to skip a restart on save once these components actually exist — on a
+        # first run (no config.yaml yet), settings_window.save_settings() must still take the
+        # restart path so this method runs for the first time.
+        self.settings_window.allow_live_reload = True
 
     def create_tray_icon(self):
         """
@@ -91,24 +91,20 @@ class WhisperWriterApp(QObject):
 
         tray_menu = QMenu()
 
-        show_action = QAction('WhisperWriter Main Menu', self.app)
-        show_action.triggered.connect(self.main_window.show)
-        tray_menu.addAction(show_action)
-
-        settings_action = QAction('Open Settings', self.app)
+        settings_action = QAction(self.app.style().standardIcon(QStyle.SP_FileDialogDetailedView), 'Open Settings', self.app)
         settings_action.triggered.connect(self.settings_window.show)
         tray_menu.addAction(settings_action)
 
         tray_menu.addSeparator()
 
-        self.copy_last_transcript_action = QAction('Copy Last Transcript', self.app)
+        self.copy_last_transcript_action = QAction(self.app.style().standardIcon(QStyle.SP_DialogSaveButton), 'Copy Last Transcript', self.app)
         self.copy_last_transcript_action.setEnabled(False)
         self.copy_last_transcript_action.triggered.connect(self.copy_last_transcript)
         tray_menu.addAction(self.copy_last_transcript_action)
 
         tray_menu.addSeparator()
 
-        exit_action = QAction('Exit', self.app)
+        exit_action = QAction(self.app.style().standardIcon(QStyle.SP_DialogCloseButton), 'Exit', self.app)
         exit_action.triggered.connect(self.exit_app)
         tray_menu.addAction(exit_action)
 
@@ -168,6 +164,17 @@ class WhisperWriterApp(QObject):
         self.cleanup()
         QApplication.quit()
         QProcess.startDetached(sys.executable, sys.argv)
+
+    def apply_live_settings(self):
+        """
+        Re-apply settings after a save that only touched schema fields marked
+        `live_reload: true` (see settings_window.py) — no restart needed. Most such settings
+        are already read fresh via ConfigManager.get_config_value() at the point of use;
+        toggle_sound_volume is the exception since it's cached on the AudioPlayer objects.
+        """
+        toggle_volume = ConfigManager.get_config_value('misc', 'toggle_sound_volume')
+        self.recording_start_sound.volume = toggle_volume
+        self.recording_stop_sound.volume = toggle_volume
 
     def on_settings_closed(self):
         """

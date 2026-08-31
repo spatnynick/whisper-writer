@@ -18,13 +18,21 @@ load_dotenv()
 class SettingsWindow(BaseWindow):
     settings_closed = pyqtSignal()
     settings_saved = pyqtSignal()
+    # Emitted instead of settings_saved when every changed setting is flagged
+    # `live_reload: true` in the schema — main.py re-applies them without restarting.
+    settings_saved_live = pyqtSignal()
 
     def __init__(self):
         """Initialize the settings window."""
         super().__init__('Settings', 700, 700, frameless=False)
         self.setWindowIcon(QIcon(os.path.join('assets', 'ww-logo.png')))
         self.schema = ConfigManager.get_schema()
+        # Set to True by main.py once the app's other components exist — on a first run
+        # (no config.yaml yet) a save must still take the restart path, since that's what
+        # actually creates them.
+        self.allow_live_reload = False
         self.init_settings_ui()
+        self.baseline_values = self.collect_current_values()
 
     def init_settings_ui(self):
         """Initialize the settings user interface."""
@@ -256,7 +264,16 @@ class SettingsWindow(BaseWindow):
         QMessageBox.information(self, 'Description', description)
 
     def save_settings(self):
-        """Save the settings to the config file and .env file."""
+        """Save the settings to the config file and .env file. If nothing actually changed,
+        this is a no-op close. If every changed setting is schema-flagged `live_reload: true`
+        and the app's components already exist, apply them in place instead of restarting."""
+        changed = self.changed_settings()
+        if not changed:
+            self.close()
+            return
+
+        live_reload_only = self.allow_live_reload and all(meta.get('live_reload') for *_, meta in changed)
+
         self.iterate_settings(self.save_setting)
 
         # Save the API key to the .env file
@@ -268,8 +285,13 @@ class SettingsWindow(BaseWindow):
         ConfigManager.set_config_value(None, 'model_options', 'api', 'api_key')
 
         ConfigManager.save_config()
-        QMessageBox.information(self, 'Settings Saved', 'Settings have been saved. The application will now restart.')
-        self.settings_saved.emit()
+        self.baseline_values = self.collect_current_values()
+
+        if live_reload_only:
+            self.settings_saved_live.emit()
+        else:
+            QMessageBox.information(self, 'Settings Saved', 'Settings have been saved. The application will now restart.')
+            self.settings_saved.emit()
         self.close()
 
     def save_setting(self, widget, category, sub_category, key, meta):
@@ -283,6 +305,30 @@ class SettingsWindow(BaseWindow):
         """Reset the settings to the saved values."""
         ConfigManager.reload_config()
         self.update_widgets_from_config()
+        self.baseline_values = self.collect_current_values()
+
+    def collect_current_values(self):
+        """Snapshot every widget's current typed value, keyed by (category, sub_category, key)."""
+        values = {}
+
+        def collect(widget, category, sub_category, key, meta):
+            values[(category, sub_category, key)] = self.get_widget_value_typed(widget, meta.get('type'))
+
+        self.iterate_settings(collect)
+        return values
+
+    def changed_settings(self):
+        """Return [(category, sub_category, key, meta)] for every widget whose value differs
+        from the last-saved/loaded baseline."""
+        changed = []
+
+        def check(widget, category, sub_category, key, meta):
+            current = self.get_widget_value_typed(widget, meta.get('type'))
+            if current != self.baseline_values.get((category, sub_category, key)):
+                changed.append((category, sub_category, key, meta))
+
+        self.iterate_settings(check)
+        return changed
 
     def update_widgets_from_config(self):
         """Update all widgets with values from the current configuration."""
@@ -365,19 +411,21 @@ class SettingsWindow(BaseWindow):
                             func(widget, category, sub_category, key, meta)
 
     def closeEvent(self, event):
-        """Confirm before closing the settings window without saving."""
-        reply = QMessageBox.question(
-            self,
-            'Close without saving?',
-            'Are you sure you want to close without saving?',
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-
-        if reply == QMessageBox.Yes:
+        """Confirm before closing the settings window, but only if something was actually
+        changed — nothing to lose otherwise, so don't nag."""
+        if self.changed_settings():
+            reply = QMessageBox.question(
+                self,
+                'Close without saving?',
+                'Are you sure you want to close without saving?',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                event.ignore()
+                return
             ConfigManager.reload_config()  # Revert to last saved configuration
             self.update_widgets_from_config()
-            self.settings_closed.emit()
-            super().closeEvent(event)
-        else:
-            event.ignore()
+
+        self.settings_closed.emit()
+        super().closeEvent(event)

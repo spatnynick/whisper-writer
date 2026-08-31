@@ -156,6 +156,7 @@ misc:
   print_to_terminal:
     value: true
     type: bool
+    live_reload: true
     description: "Set to true to print the script status and transcribed text to the terminal."
   hide_status_window:
     value: false
@@ -164,10 +165,12 @@ misc:
   noise_on_completion:
     value: false
     type: bool
+    live_reload: true
     description: "Set to true to play a noise after the transcription has been typed out."
   status_window_position:
     value: bottom_right
     type: str
+    live_reload: true
     options:
       - bottom_right
       - bottom_center
@@ -180,12 +183,15 @@ misc:
   show_tray_status_icon:
     value: true
     type: bool
+    live_reload: true
     description: "Change the system tray icon color/glyph while recording and transcribing, independent of the status popup (misc.hide_status_window)."
   play_toggle_sounds:
     value: true
     type: bool
+    live_reload: true
     description: "Play a short sound when recording starts and another when it stops (independent of misc.noise_on_completion, which plays after transcription is typed out)."
   toggle_sound_volume:
     value: 25
     type: int
+    live_reload: true
     description: "Volume (0-100) of the recording start/stop toggle sounds."
