@@ -222,6 +222,15 @@ relevant lines):
 If pulling in upstream changes later (below), these three are already covered — don't worry if
 `git merge` reports them as already-applied/no-op.
 
+## Recover a lost transcript (2026-08-31)
+
+Nothing is persisted to disk — if `typewrite()` fails to reach the focused window (wrong
+window had focus, target app crashed, etc.), the transcript used to just be gone. The tray menu
+now has a **"Copy Last Transcript"** item (greyed out until at least one transcript exists) that
+copies the most recently transcribed text to the clipboard. It's purely manual/opt-in — the app
+never touches the clipboard on its own, only in-memory tracking (`WhisperWriterApp.last_transcript`
+in `src/main.py`), cleared on restart.
+
 ## Pulling upstream changes later
 
 ```
