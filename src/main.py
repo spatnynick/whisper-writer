@@ -57,6 +57,13 @@ class WhisperWriterApp(QObject):
         self.current_status = 'idle'
         self.last_transcript = None
 
+        # Kept alive as instance attributes rather than created fresh per play() call: a
+        # non-blocking AudioPlayer's GStreamer pipeline is torn down as soon as the Python
+        # object is garbage-collected, which (with no reference held) happens essentially
+        # immediately after play(block=False) returns — before any audio is actually output.
+        self.recording_start_sound = AudioPlayer(os.path.join('assets', 'recording-start.wav'))
+        self.recording_stop_sound = AudioPlayer(os.path.join('assets', 'recording-stop.wav'))
+
         self.main_window = MainWindow()
         self.main_window.openSettings.connect(self.settings_window.show)
         self.main_window.startListening.connect(self.key_listener.start)
@@ -228,9 +235,9 @@ class WhisperWriterApp(QObject):
 
         if ConfigManager.get_config_value('misc', 'play_toggle_sounds'):
             if status == 'recording' and previous_status != 'recording':
-                AudioPlayer(os.path.join('assets', 'recording-start.wav')).play(block=False)
+                self.recording_start_sound.play(block=False)
             elif previous_status == 'recording' and status != 'recording':
-                AudioPlayer(os.path.join('assets', 'recording-stop.wav')).play(block=False)
+                self.recording_stop_sound.play(block=False)
 
         if status == 'cancel':
             if ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous':
