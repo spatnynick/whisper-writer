@@ -177,3 +177,7 @@ misc:
       - top_left
       - center
     description: "Where the recording/transcribing status popup appears on screen."
+  show_tray_status_icon:
+    value: true
+    type: bool
+    description: "Change the system tray icon color/glyph while recording and transcribing, independent of the status popup (misc.hide_status_window)."

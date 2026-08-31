@@ -69,7 +69,11 @@ class WhisperWriterApp(QObject):
         """
         Create the system tray icon and its context menu.
         """
-        self.tray_icon = QSystemTrayIcon(QIcon(os.path.join('assets', 'ww-logo.png')), self.app)
+        self.tray_icon_idle = QIcon(os.path.join('assets', 'ww-logo.png'))
+        self.tray_icon_recording = QIcon(os.path.join('assets', 'ww-logo-recording.png'))
+        self.tray_icon_transcribing = QIcon(os.path.join('assets', 'ww-logo-transcribing.png'))
+
+        self.tray_icon = QSystemTrayIcon(self.tray_icon_idle, self.app)
 
         tray_menu = QMenu()
 
@@ -87,6 +91,21 @@ class WhisperWriterApp(QObject):
 
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.show()
+
+    def update_tray_icon(self, status):
+        """
+        Update the system tray icon to reflect the current recording/transcribing status,
+        if enabled via the misc.show_tray_status_icon setting.
+        """
+        if not ConfigManager.get_config_value('misc', 'show_tray_status_icon'):
+            return
+
+        if status == 'recording':
+            self.tray_icon.setIcon(self.tray_icon_recording)
+        elif status == 'transcribing':
+            self.tray_icon.setIcon(self.tray_icon_transcribing)
+        elif status in ('idle', 'error', 'cancel'):
+            self.tray_icon.setIcon(self.tray_icon_idle)
 
     def cleanup(self):
         if self.key_listener:
@@ -152,6 +171,7 @@ class WhisperWriterApp(QObject):
         if not ConfigManager.get_config_value('misc', 'hide_status_window'):
             self.result_thread.statusSignal.connect(self.status_window.updateStatus)
             self.status_window.closeSignal.connect(self.stop_result_thread)
+        self.result_thread.statusSignal.connect(self.update_tray_icon)
         self.result_thread.resultSignal.connect(self.on_transcription_complete)
         self.result_thread.start()
 
