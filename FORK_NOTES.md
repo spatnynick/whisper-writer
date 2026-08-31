@@ -232,12 +232,13 @@ If pulling in upstream changes later (below), these three are already covered �
   Fixed by keeping `self.recording_start_sound`/`self.recording_stop_sound` as persistent
   instance attributes, reused across every toggle. If adding another non-blocking sound
   anywhere in this app, reuse this pattern rather than a fresh `AudioPlayer(...)` per call.
-  Loudness is a real Settings option (`misc.toggle_sound_volume`, 0-100, default 15) applied via
+  Loudness is a real Settings option (`misc.toggle_sound_volume`, 0-100, default 25) applied via
   `AudioPlayer.volume`, not baked into the WAV amplitude — after two rounds of "still too loud"
   from re-baking the files, this needed to be a runtime knob instead.
 - Settings window switched to a normal, non-transparent, native-look top-level window instead
   of the frameless "card" style — `BaseWindow` now takes a `frameless=True/False` switch; only
-  `SettingsWindow` opts out (`MainWindow`/`StatusWindow` are unaffected, still frameless cards).
+  `SettingsWindow` opts out. (`MainWindow` was later removed entirely — see below — so
+  `StatusWindow` is now the only other `BaseWindow` subclass, still a frameless card.)
   Reset/Save buttons moved onto one row, right-aligned.
 - New **About** tab in Settings: commit hash/date, commits-ahead-of-upstream count, and
   clickable links for this fork and upstream — all read live via `git` subprocess calls in
@@ -253,6 +254,64 @@ now has a **"Copy Last Transcript"** item (greyed out until at least one transcr
 copies the most recently transcribed text to the clipboard. It's purely manual/opt-in — the app
 never touches the clipboard on its own, only in-memory tracking (`WhisperWriterApp.last_transcript`
 in `src/main.py`), cleared on restart.
+
+## Tray-only app, no more Main Window (2026-08-31)
+
+`MainWindow` (`src/ui/main_window.py`) was just a "Start" / "Settings" button pair shown on
+launch — pure friction, since the app already auto-starts listening on launch and both actions
+were already duplicated in the tray menu. Removed entirely:
+
+- `src/ui/main_window.py` deleted.
+- `src/main.py`: no longer constructs it, tray menu's "WhisperWriter Main Menu" item removed.
+  Tray menu is now just Open Settings / Copy Last Transcript / Exit — each with a small standard
+  Qt icon (`QStyle.SP_*` — no new asset files needed) instead of plain text.
+- The app now has exactly one window a user ever sees: Settings (opened from the tray). Nothing
+  else references `MainWindow`/`main_window` — confirmed via a full grep of `src/` before deleting.
+
+## Settings: only nag/restart when something that needs it actually changed (2026-08-31)
+
+Two separate annoyances, same root cause — the Settings window used to treat every close/save
+identically regardless of whether anything changed:
+
+- **Closing without saving** always asked "Are you sure?", even if you'd touched nothing.
+- **Saving** always showed "Settings have been saved. The application will now restart." and
+  triggered a full process restart (`WhisperWriterApp.restart_app`) — even for a change like
+  toggle-sound volume that doesn't need one. Worse, the old `save_settings()` called
+  `self.close()` *after* already emitting `settings_saved` — which re-entered the unconditional
+  `closeEvent()` confirmation dialog a second time before the process actually quit. Every save
+  briefly flashed a redundant "close without saving?" dialog.
+
+Fixed with dirty-tracking + a per-setting `live_reload` schema flag:
+
+- `SettingsWindow.baseline_values`: a `{(category, sub_category, key): typed_value}` snapshot
+  taken right after the widgets are built, and refreshed after every successful `Reset` or
+  `Save`. `changed_settings()` compares live widget values against this baseline.
+- `closeEvent()` now only shows the confirmation dialog when `changed_settings()` is non-empty;
+  otherwise it closes immediately. Since a successful save refreshes the baseline *before*
+  `self.close()` runs, the redundant post-save dialog is gone too — `changed_settings()` is
+  empty by the time `closeEvent()` fires.
+- `save_settings()`: if nothing changed, it's a no-op close. Otherwise it checks whether every
+  changed field has `live_reload: true` in `config_schema.yaml` (and `SettingsWindow.
+  allow_live_reload` is `True` — only set once `WhisperWriterApp.initialize_components()` has
+  actually run, so a first-run save with no config.yaml yet still takes the restart path, since
+  that's what creates the components in the first place). If so, it emits `settings_saved_live`
+  instead of `settings_saved`; `main.py`'s `apply_live_settings()` handles it with no restart and
+  no dialog.
+  - Currently flagged `live_reload: true`: `misc.print_to_terminal`, `misc.noise_on_completion`,
+    `misc.status_window_position`, `misc.show_tray_status_icon`, `misc.play_toggle_sounds`,
+    `misc.toggle_sound_volume`. All of these except the last were *already* read live via
+    `ConfigManager.get_config_value()` at the point of use (checked each call site before
+    flagging) — the flag just stops the app from unnecessarily restarting for them. Volume is
+    the one exception: it's cached on the `AudioPlayer.volume` property at construction time, so
+    `apply_live_settings()` explicitly re-sets it on both persistent sound-player instances.
+  - Everything else (model options, recording options, post-processing, `hide_status_window`)
+    still restarts on save — those genuinely are read once at construction (model load, key
+    listener backend, input simulator method, `StatusWindow` existing at all) and re-reading
+    them live isn't safe to fake with a flag; a real restart is correct there.
+  - **If you add a new schema field**: only mark it `live_reload: true` after verifying its
+    call site actually re-reads `ConfigManager.get_config_value()` on every use rather than
+    caching a value at `__init__`/construction time — mislabeling something as live-reload-safe
+    will make a save silently apply nothing until the next real restart.
 
 ## Pulling upstream changes later
 
