@@ -267,6 +267,13 @@ were already duplicated in the tray menu. Removed entirely:
   Qt icon (`QStyle.SP_*` — no new asset files needed) instead of plain text.
 - The app now has exactly one window a user ever sees: Settings (opened from the tray). Nothing
   else references `MainWindow`/`main_window` — confirmed via a full grep of `src/` before deleting.
+- **Gotcha this caused:** `QApplication.quitOnLastWindowClosed` defaults to `True`. With
+  `MainWindow` gone, Settings became the *only* window Qt ever sees shown — so closing it (as
+  "the last window") quit the entire app, tray icon and key listener included, not just the
+  window. Fixed with one line in `WhisperWriterApp.__init__`:
+  `self.app.setQuitOnLastWindowClosed(False)`. The tray icon (`exit_app`) now controls app
+  lifetime, not window count. If any future window is added and shown persistently, re-check
+  this still behaves as intended.
 
 ## Settings: only nag/restart when something that needs it actually changed (2026-08-31)
 
