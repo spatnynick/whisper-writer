@@ -57,17 +57,29 @@ No `pyenv` needed — system Python 3.12 works directly now.
 
 ```
 gh auth login --hostname github.com --git-protocol https --web   # interactive: browser approval
-git clone https://github.com/spatnynick/whisper-writer.git ~/apps/whisper-writer
-cd ~/apps/whisper-writer
+sudo mkdir -p /opt/whisper-writer
+sudo chown bogo:bogo /opt/whisper-writer
+git clone https://github.com/spatnynick/whisper-writer.git /opt/whisper-writer
+cd /opt/whisper-writer
 git remote add upstream https://github.com/savbell/whisper-writer.git
 python3 -m venv venv
 venv/bin/pip install --upgrade pip
 venv/bin/pip install -r requirements.txt
+sudo chown bogo:users /opt/whisper-writer   # directory itself; files stay bogo:bogo
 ```
 
-Then `src/config.yaml` (gitignored, per-machine — see below), the KDE desktop entry/icon, and
-`start.sh` (already executable, tracked in git). Launch via `~/apps/whisper-writer/start.sh`
-or the "WhisperWriter" KDE menu entry.
+Lives at `/opt/whisper-writer`, owned by `bogo` (not root) so it can be updated with a plain
+`git pull` — no `sudo` needed day to day, matching how `openwhispr` and `whispering` were set
+up under `/opt` before. Then `src/config.yaml` (gitignored, per-machine — see below), the KDE
+desktop entry/icon (`Exec=/opt/whisper-writer/start.sh`, `Path=/opt/whisper-writer`), and
+`start.sh` (already executable, tracked in git). Launch via `/opt/whisper-writer/start.sh` or
+the "WhisperWriter" KDE menu entry.
+
+If the venv was ever created at a different path and then moved (e.g. relocated into
+`/opt`), rebuild it rather than trying to reuse it — `venv/bin/activate` and `venv/bin/pip`
+both hardcode the venv's absolute path at creation time and break silently (fall through to
+the system Python, or a broken shebang) if the directory is renamed or moved afterward. This
+is exactly why `start.sh` calls `venv/bin/python3` directly instead of sourcing `activate`.
 
 ## Config (kept identical on all three machines)
 
