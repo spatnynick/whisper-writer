@@ -1,8 +1,7 @@
 import os
 import sys
-from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import QApplication, QPushButton, QHBoxLayout
-from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from ui.base_window import BaseWindow
@@ -24,13 +23,20 @@ class MainWindow(BaseWindow):
         Initialize the main user interface.
         """
         start_btn = QPushButton('Start')
-        start_btn.setFont(QFont('Segoe UI', 10))
+        start_btn.setObjectName('primaryButton')
+        start_font = start_btn.font()
+        start_font.setPointSize(10)
+        start_btn.setFont(start_font)
         start_btn.setFixedSize(120, 60)
+        start_btn.setCursor(Qt.PointingHandCursor)
         start_btn.clicked.connect(self.startPressed)
 
         settings_btn = QPushButton('Settings')
-        settings_btn.setFont(QFont('Segoe UI', 10))
+        settings_font = settings_btn.font()
+        settings_font.setPointSize(10)
+        settings_btn.setFont(settings_font)
         settings_btn.setFixedSize(120, 60)
+        settings_btn.setCursor(Qt.PointingHandCursor)
         settings_btn.clicked.connect(self.openSettings.emit)
 
         button_layout = QHBoxLayout()
