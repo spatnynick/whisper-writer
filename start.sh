@@ -1,5 +1,4 @@
 #!/bin/bash
 cd "$(dirname "$0")"
-source venv/bin/activate
 export OPENAI_API_KEY="not-needed"
-exec python3 run.py
+exec venv/bin/python3 run.py

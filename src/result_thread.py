@@ -1,7 +1,7 @@
 import time
 import traceback
 import numpy as np
-import sounddevice as sd
+import pyaudio
 import tempfile
 import wave
 import webrtcvad
@@ -133,43 +133,55 @@ class ResultThread(QThread):
 
         data_ready = Event()
 
-        def audio_callback(indata, frames, time, status):
+        def audio_callback(in_data, frame_count, time_info, status):
             if status:
                 ConfigManager.console_print(f"Audio callback status: {status}")
-            audio_buffer.extend(indata[:, 0])
+            indata = np.frombuffer(in_data, dtype=np.int16)
+            audio_buffer.extend(indata)
             data_ready.set()
+            return (None, pyaudio.paContinue)
 
-        with sd.InputStream(samplerate=self.sample_rate, channels=1, dtype='int16',
-                            blocksize=frame_size, device=recording_options.get('sound_device'),
-                            callback=audio_callback):
-            while self.is_running and self.is_recording:
-                data_ready.wait()
-                data_ready.clear()
+        sound_device = recording_options.get('sound_device')
+        audio = pyaudio.PyAudio()
+        try:
+            stream = audio.open(format=pyaudio.paInt16, channels=1, rate=self.sample_rate,
+                                 input=True, frames_per_buffer=frame_size,
+                                 input_device_index=sound_device,
+                                 stream_callback=audio_callback)
+            try:
+                while self.is_running and self.is_recording:
+                    data_ready.wait()
+                    data_ready.clear()
 
-                if len(audio_buffer) < frame_size:
-                    continue
+                    if len(audio_buffer) < frame_size:
+                        continue
 
-                # Save frame
-                frame = np.array(list(audio_buffer), dtype=np.int16)
-                audio_buffer.clear()
-                recording.extend(frame)
+                    # Save frame
+                    frame = np.array(list(audio_buffer), dtype=np.int16)
+                    audio_buffer.clear()
+                    recording.extend(frame)
 
-                # Avoid trying to detect voice in initial frames
-                if initial_frames_to_skip > 0:
-                    initial_frames_to_skip -= 1
-                    continue
+                    # Avoid trying to detect voice in initial frames
+                    if initial_frames_to_skip > 0:
+                        initial_frames_to_skip -= 1
+                        continue
 
-                if vad:
-                    if vad.is_speech(frame.tobytes(), self.sample_rate):
-                        silent_frame_count = 0
-                        if not speech_detected:
-                            ConfigManager.console_print("Speech detected.")
-                            speech_detected = True
-                    else:
-                        silent_frame_count += 1
+                    if vad:
+                        if vad.is_speech(frame.tobytes(), self.sample_rate):
+                            silent_frame_count = 0
+                            if not speech_detected:
+                                ConfigManager.console_print("Speech detected.")
+                                speech_detected = True
+                        else:
+                            silent_frame_count += 1
 
-                    if speech_detected and silent_frame_count > silence_frames:
-                        break
+                        if speech_detected and silent_frame_count > silence_frames:
+                            break
+            finally:
+                stream.stop_stream()
+                stream.close()
+        finally:
+            audio.terminate()
 
         audio_data = np.array(recording, dtype=np.int16)
         duration = len(audio_data) / self.sample_rate

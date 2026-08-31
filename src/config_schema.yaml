@@ -110,7 +110,7 @@ recording_options:
   sound_device:
     value: null
     type: str
-    description: "The numeric index of the sound device to use for recording. To find device numbers, run `python -m sounddevice`"
+    description: "The numeric index of the sound device to use for recording. To find device numbers, run `python -c \"import pyaudio; p = pyaudio.PyAudio(); [print(i, p.get_device_info_by_index(i)['name']) for i in range(p.get_device_count())]\"`"
   sample_rate:
     value: 16000
     type: int
