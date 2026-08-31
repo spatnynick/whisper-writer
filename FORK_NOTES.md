@@ -222,6 +222,21 @@ relevant lines):
 If pulling in upstream changes later (below), these three are already covered — don't worry if
 `git merge` reports them as already-applied/no-op.
 
+## Recording toggle sounds, Settings window overhaul (2026-08-31)
+
+- Two short tones now play on the recording start/stop toggle (not on transcription
+  completion — that's still `misc.noise_on_completion`), matching a feature OpenWhispr had.
+  Toggle with `misc.play_toggle_sounds` (default on).
+- Settings window switched to a normal, non-transparent, native-look top-level window instead
+  of the frameless "card" style — `BaseWindow` now takes a `frameless=True/False` switch; only
+  `SettingsWindow` opts out (`MainWindow`/`StatusWindow` are unaffected, still frameless cards).
+  Reset/Save buttons moved onto one row, right-aligned.
+- New **About** tab in Settings: commit hash/date, commits-ahead-of-upstream count, and
+  clickable links for this fork and upstream — all read live via `git` subprocess calls in
+  `settings_window.py` (`git_info()`/`github_web_url()`), nothing hardcoded. If this repo is
+  ever forked again under a different GitHub owner, it'll show correctly with zero code changes
+  as long as the `origin`/`upstream` remotes are named the same.
+
 ## Recover a lost transcript (2026-08-31)
 
 Nothing is persisted to disk — if `typewrite()` fails to reach the focused window (wrong
