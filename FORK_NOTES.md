@@ -199,6 +199,29 @@ correctness fixes:
   shows up automatically as a Settings dropdown since the schema already auto-generates one for
   any `str` field with `options`).
 
+## Backported fixes from upstream's open PRs (2026-08-31)
+
+Upstream (`savbell/whisper-writer`) is unmaintained but still has 23 open PRs. Reviewed all of
+them for anything worth reusing rather than re-discovering the same bugs later. Most were
+Windows-specific, superseded by fixes this fork already made independently (pynput key-mapping
+SPACE fallback, exact-match key chords, double-start guarding — see PRs #75, #154, #148), or
+large abandoned rewrites (#61, #102, #103, #136) not worth grafting onto a stable personal fork.
+Three small ones were genuinely missing and got backported directly (not full merges, just the
+relevant lines):
+
+- **#72** — `post_process_transcription()` was adding a trailing space even to an empty
+  transcription (a silent/false-trigger recording), typing a stray space each time.
+- **#148** — `PynputBackend.start()` now calls `self.stop()` first, so it's safe to call twice
+  in a row without leaking an X11 listener connection. (`KeyListener` already guarded this one
+  layer up; this covers the backend directly too, in case anything ever calls it without going
+  through the wrapper.)
+- **#155** — `config.yaml`/`config_schema.yaml` are now read with `encoding='utf-8-sig'`, so a
+  BOM-prefixed file (e.g. saved once from a Windows editor) doesn't break YAML parsing;
+  `config.yaml` is written back as plain `utf-8`.
+
+If pulling in upstream changes later (below), these three are already covered — don't worry if
+`git merge` reports them as already-applied/no-op.
+
 ## Pulling upstream changes later
 
 ```
