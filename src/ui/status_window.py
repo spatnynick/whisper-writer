@@ -1,8 +1,9 @@
 import sys
 import os
-from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer, QPropertyAnimation
+import time
+from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer
 from PyQt5.QtGui import QPixmap, QIcon, QPainter
-from PyQt5.QtWidgets import QApplication, QLabel, QHBoxLayout, QGraphicsOpacityEffect
+from PyQt5.QtWidgets import QApplication, QLabel, QHBoxLayout
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from ui.base_window import BaseWindow
@@ -39,15 +40,18 @@ class StatusWindow(BaseWindow):
         self.icon_label.setPixmap(self.microphone_pixmap)
         self.icon_label.setAlignment(Qt.AlignCenter)
 
-        # Opacity effect + animation used to pulse the icon while recording.
-        self.icon_opacity_effect = QGraphicsOpacityEffect(self.icon_label)
-        self.icon_label.setGraphicsEffect(self.icon_opacity_effect)
-        self.pulse_animation = QPropertyAnimation(self.icon_opacity_effect, b"opacity")
-        self.pulse_animation.setDuration(900)
-        self.pulse_animation.setStartValue(1.0)
-        self.pulse_animation.setKeyValueAt(0.5, 0.45)
-        self.pulse_animation.setEndValue(1.0)
-        self.pulse_animation.setLoopCount(-1)
+        # Manual pulse: a plain QTimer regenerates a pixmap with a painter-applied opacity
+        # and calls setPixmap() on icon_label every tick. Deliberately NOT a QGraphicsEffect:
+        # a QGraphicsOpacityEffect on icon_label (nested inside main_widget, which itself
+        # carries a QGraphicsDropShadowEffect, inside a translucent frameless top-level
+        # window with a custom paintEvent) rendered a stray duplicate icon outside the
+        # window bounds and intermittently failed to repaint the "real" icon after
+        # start/stop/setOpacity calls. Plain QLabel.setPixmap() sidesteps that bug class.
+        self._pulse_timer = QTimer(self)
+        self._pulse_timer.timeout.connect(self._onPulseTick)
+        self._pulse_base_pixmap = None
+        self._pulse_start_time = 0.0
+        self._pulse_period = 0.9  # seconds per dim-and-back cycle
 
         self.status_label = QLabel('Recording...')
         status_font = self.status_label.font()
@@ -79,6 +83,48 @@ class StatusWindow(BaseWindow):
         painter.end()
         return tinted
 
+    def _startPulse(self, base_pixmap, period=0.9):
+        """
+        Start pulsing `base_pixmap` on icon_label between full opacity and a dimmed
+        opacity, via a plain QTimer + QLabel.setPixmap() (no QGraphicsEffect).
+        """
+        self._pulse_base_pixmap = base_pixmap
+        self._pulse_period = period
+        self._pulse_start_time = time.monotonic()
+        self._onPulseTick()
+        self._pulse_timer.start(40)
+
+    def _stopPulse(self):
+        """
+        Stop the pulse timer, if running.
+        """
+        self._pulse_timer.stop()
+
+    def _onPulseTick(self):
+        """
+        Compute the current opacity from elapsed time and repaint icon_label with a
+        freshly composited pixmap at that opacity.
+        """
+        elapsed = time.monotonic() - self._pulse_start_time
+        phase = (elapsed % self._pulse_period) / self._pulse_period  # 0..1
+        # Triangle wave: 1.0 -> 0.45 -> 1.0
+        opacity = 1.0 - 0.55 * (1 - abs(2 * phase - 1))
+        self.icon_label.setPixmap(self._opacityPixmap(self._pulse_base_pixmap, opacity))
+
+    def _opacityPixmap(self, base_pixmap, opacity):
+        """
+        Return a new QPixmap with `base_pixmap` drawn onto a transparent pixmap at the
+        given painter opacity (ordinary compositing, no QGraphicsEffect involved).
+        """
+        result = QPixmap(base_pixmap.size())
+        result.setDevicePixelRatio(base_pixmap.devicePixelRatio())
+        result.fill(Qt.transparent)
+        painter = QPainter(result)
+        painter.setOpacity(opacity)
+        painter.drawPixmap(0, 0, base_pixmap)
+        painter.end()
+        return result
+
     def show(self):
         """
         Position the window according to the configured status_window_position and show it.
@@ -104,7 +150,7 @@ class StatusWindow(BaseWindow):
         """
         Emit the close signal when the window is closed.
         """
-        self.pulse_animation.stop()
+        self._stopPulse()
         self.closeSignal.emit()
         super().closeEvent(event)
 
@@ -114,19 +160,17 @@ class StatusWindow(BaseWindow):
         Update the status window based on the given status.
         """
         if status == 'recording':
-            self.icon_label.setPixmap(self.microphone_pixmap)
             self.status_label.setText('Recording...')
-            self.pulse_animation.start()
+            self._startPulse(self.microphone_pixmap, period=0.9)
             self.show()
         elif status == 'transcribing':
-            self.pulse_animation.stop()
-            self.icon_opacity_effect.setOpacity(1.0)
-            self.icon_label.setPixmap(self.pencil_pixmap)
             self.status_label.setText('Transcribing...')
+            # Slightly slower period than recording, to read as "processing" rather
+            # than the more urgent recording pulse.
+            self._startPulse(self.pencil_pixmap, period=1.4)
 
         if status in ('idle', 'error', 'cancel'):
-            self.pulse_animation.stop()
-            self.icon_opacity_effect.setOpacity(1.0)
+            self._stopPulse()
             self.close()
 
 
