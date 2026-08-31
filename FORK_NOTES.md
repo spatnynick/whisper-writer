@@ -141,6 +141,57 @@ instead and needs no special permissions.
 - Idle CPU is ~0% (verified) — this was a real, separate problem with a different dictation
   app (Whispering) we evaluated and rejected before landing on WhisperWriter; not relevant here.
 
+## UI refresh, auto-start, debug logging (2026-08-31)
+
+A second round of changes, independent of the three bug fixes above — cosmetic/UX polish, not
+correctness fixes:
+
+- **Auto-starts listening on launch.** `main.py` no longer shows the "Start/Settings" popup on
+  startup — it calls `key_listener.start()` directly, same as clicking Start. The main window
+  still exists and is reachable via the tray's "WhisperWriter Main Menu" action.
+  `KeyListener.start()` is now idempotent (safe to call twice) since this made a redundant
+  Start click a real possibility.
+- **`--debug` flag** (`start.sh --debug` / `run.py --debug`): enables DEBUG-level logging to
+  `~/.cache/whisper-writer/debug.log` (stdout too) via `src/logging_setup.py`. Instrumented:
+  `input_simulation.py typewrite()` (timing), `key_listener.py on_input_event()` (every raw key
+  event + activate/deactivate), `result_thread.py` (recording/stream timing, alongside the
+  existing `console_print` calls, not replacing them), `transcription.py transcribe_api()`
+  (HTTP call duration specifically, to isolate NAS network latency). Off by default — zero
+  behavior change when the flag isn't passed. `run.py` now forwards its own argv to the
+  `src/main.py` subprocess it spawns (it silently dropped all args before).
+- **New app icon and status-popup icons.** `assets/ww-logo.svg`/`.png`/`.ico` — a flat indigo
+  (`#4F46E5`) circle with a white mic glyph, replacing the old generic 800x800 logo.
+  `assets/icon-mic.svg`/`icon-pencil.svg` → `assets/microphone.png`/`pencil.png` — redesigned
+  as solid-black flat silhouettes on transparent backgrounds (pure alpha masks), so the status
+  popup can tint them at runtime to match the active theme instead of shipping fixed-color art.
+- **`src/ui/base_window.py` now follows the active KDE/Qt palette** instead of a hardcoded
+  white background + `#404040` text — `self.card_color`/`text_color`/`accent_color` are
+  resolved from `QPalette.Window`/`WindowText`/`Highlight`, so every window automatically
+  matches light or dark KDE color schemes with no per-theme code. Added a real drop shadow
+  (`QGraphicsDropShadowEffect` on the inset card widget — see `SHADOW_MARGIN` below), dropped
+  the hardcoded `'Segoe UI'` font (doesn't exist on Linux, was silently falling back anyway —
+  now just overrides size/weight and inherits the system font), and added a shared
+  `_build_stylesheet()` QSS builder (flat rounded buttons/inputs/tabs) inherited by every
+  `BaseWindow` subclass. `MainWindow`'s Start button is now visually primary (accent-filled,
+  `objectName('primaryButton')`).
+  - **Gotcha:** `BaseWindow.SHADOW_MARGIN = 16` (px) pads the actual top-level window beyond
+    the caller-requested `width`/`height` to leave room for the shadow to render (a frameless
+    translucent window can't paint outside its own pixel bounds). `self.width()`/`height()` on
+    any subclass therefore return `requested + 32`, not the requested size — anything doing
+    manual on-screen positioning math (see `StatusWindow.show()`) needs to account for this.
+  - `BaseWindow` also gained `show_title_bar` (constructor arg, default `True`) and
+    `self.corner_radius` (default `16`) so a subclass can opt out of the title bar and use a
+    different corner radius (`StatusWindow` sets both, for its pill shape).
+- **Status popup redesigned**: shrunk from a boxy `320x120` to a small `200x56` pill
+  (`corner_radius = 28`, no title bar), theme-tinted icons (mic tinted with `accent_color`
+  while recording, pencil tinted with `text_color` while transcribing — the mic/pencil
+  distinction itself is unchanged, still shows which state the app is in), a subtle pulsing
+  opacity animation on the mic icon while recording. Position is now configurable —
+  `misc.status_window_position` in `config_schema.yaml` (`bottom_right` / `bottom_center` /
+  `bottom_left` / `top_right` / `top_center` / `top_left` / `center`, default `bottom_right`,
+  shows up automatically as a Settings dropdown since the schema already auto-generates one for
+  any `str` field with `options`).
+
 ## Pulling upstream changes later
 
 ```
