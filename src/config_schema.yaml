@@ -181,3 +181,7 @@ misc:
     value: true
     type: bool
     description: "Change the system tray icon color/glyph while recording and transcribing, independent of the status popup (misc.hide_status_window)."
+  play_toggle_sounds:
+    value: true
+    type: bool
+    description: "Play a short sound when recording starts and another when it stops (independent of misc.noise_on_completion, which plays after transcription is typed out)."

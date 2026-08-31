@@ -219,10 +219,19 @@ class WhisperWriterApp(QObject):
     def on_status_changed(self, status):
         """
         Track the current recording/transcription status (used to gate the cancel hotkey),
-        and re-arm listening after a cancelled recording (which, unlike a normal completed
-        recording, never reaches on_transcription_complete since nothing was transcribed).
+        play the recording start/stop toggle sounds, and re-arm listening after a cancelled
+        recording (which, unlike a normal completed recording, never reaches
+        on_transcription_complete since nothing was transcribed).
         """
+        previous_status = self.current_status
         self.current_status = status
+
+        if ConfigManager.get_config_value('misc', 'play_toggle_sounds'):
+            if status == 'recording' and previous_status != 'recording':
+                AudioPlayer(os.path.join('assets', 'recording-start.wav')).play(block=False)
+            elif previous_status == 'recording' and status != 'recording':
+                AudioPlayer(os.path.join('assets', 'recording-stop.wav')).play(block=False)
+
         if status == 'cancel':
             if ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous':
                 self.start_result_thread()
