@@ -333,12 +333,29 @@ class WhisperWriterApp(QObject):
 if __name__ == '__main__':
     import argparse
     from logging_setup import configure_logging
+    from single_instance import SingleInstanceLock
 
     parser = argparse.ArgumentParser(description='WhisperWriter')
     parser.add_argument('--debug', action='store_true', help='Enable debug logging to ~/.cache/whisper-writer/debug.log')
     args = parser.parse_args()
 
     configure_logging(args.debug)
+
+    # Held for the lifetime of the process (module-level name, never reassigned) — the OS
+    # releases it automatically on exit, so no explicit release/cleanup path is needed.
+    instance_lock = SingleInstanceLock()
+    if not instance_lock.acquire():
+        print('WhisperWriter is already running — exiting.')
+        notice_app = QApplication(sys.argv)
+        app_icon = QIcon(os.path.join('assets', 'ww-logo.png'))
+        notice_app.setWindowIcon(app_icon)
+        already_running_box = QMessageBox()
+        already_running_box.setWindowTitle('WhisperWriter')
+        already_running_box.setWindowIcon(app_icon)
+        already_running_box.setIconPixmap(app_icon.pixmap(48, 48))
+        already_running_box.setText('WhisperWriter is already running.')
+        already_running_box.exec_()
+        sys.exit(1)
 
     app = WhisperWriterApp()
     app.run()

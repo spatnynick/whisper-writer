@@ -436,6 +436,34 @@ when everything's already satisfied, so always reconciling costs a couple of sec
 removes this whole class of bug (also covers a venv rebuilt from an older checkout, or a
 previous `update.sh` run interrupted mid-install).
 
+## Single-instance enforcement (2026-09-01)
+
+Nothing stopped multiple copies of WhisperWriter from running at once (e.g. launching
+`start.sh` manually while the autostart-launched copy was already in the tray) — each one
+would grab its own hotkey listener and tray icon, stepping on each other. Fixed with
+`src/single_instance.py` (`SingleInstanceLock`): an exclusive, non-blocking `flock()` on
+`~/.cache/whisper-writer/instance.lock`, acquired at the very top of `main.py`'s
+`__main__` block, before `WhisperWriterApp` is constructed.
+
+- `flock` over a PID file on purpose — a PID file needs its own staleness checks (crashed
+  process, PID reused by something unrelated since); the kernel drops an `flock` the
+  instant the holding process exits for *any* reason, crash included, so there's nothing
+  that can go stale.
+- `acquire()` retries for ~3s (15 × 0.2s) before giving up, not a single non-blocking
+  check — `restart_app()` (settings-save restart) starts the new process via
+  `QProcess.startDetached()` *before* the old one has actually exited (that only happens
+  once `QApplication.quit()` unwinds `app.exec_()` back in `run()`), so the new process
+  can briefly race the old one for the lock. Without the retry window, every
+  settings-triggered restart would falsely report "already running."
+- On failure, shows a small `QMessageBox` (with the WhisperWriter logo as both the window
+  icon and the box's own icon, via `QIcon(...).pixmap(48, 48)` — not the default OS
+  warning triangle) and exits with status 1. This is a real modal dialog — confirmed by
+  timing a blocked second launch against `timeout`, it hangs until dismissed, so a
+  double-launch gives clear visible feedback rather than silently doing nothing.
+- `update.sh`'s restart path doesn't hit this race: it SIGTERMs (then SIGKILLs if needed)
+  and waits for the old process to fully exit before relaunching, so the lock is always
+  free by the time the new one starts.
+
 ## Pulling upstream changes later
 
 ```
