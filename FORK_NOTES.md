@@ -436,6 +436,42 @@ when everything's already satisfied, so always reconciling costs a couple of sec
 removes this whole class of bug (also covers a venv rebuilt from an older checkout, or a
 previous `update.sh` run interrupted mid-install).
 
+## Hotkey silently stops firing after a while (2026-09-01)
+
+Reported: worked for a few transcripts, then `ctrl+shift+space` stopped triggering
+recording entirely — no crash, no error, the app just stopped reacting to the hotkey
+until restarted.
+
+Root cause: `WhisperWriterApp.key_listener` was never stopped while
+`input_simulator.typewrite()` was typing out a transcript — it ran continuously through
+record → transcribe → type. But pynput's global listener (`PynputBackend`, the
+`input_backend: pynput` default) is built on X11's XRecord extension, which also reports
+synthetic, XTest-injected key events — the ones `typewrite()` itself generates to type
+the result — indistinguishably from real ones. This is a documented pynput gotcha, not
+specific to this fork.
+
+`KeyChord.is_active()` (added as "defense in depth" in fix #2, see top of this file)
+requires an *exact* match: `pressed_keys` must equal the chord's own keys, no extras. It
+tracks every key press/release it sees, chord-relevant or not. Normally a synthesized
+press is followed by its own release milliseconds later, so `pressed_keys` self-clears.
+But on rare bad timing — more likely the longer and more punctuated the transcript, so it
+can take a few transcripts to hit — a synthetic press or release can get dropped or
+reordered against a real hotkey press happening in the same window. Whatever key that
+was gets stuck "pressed" in `KeyChord.pressed_keys` forever, and since it's never part of
+the configured chord, `pressed_keys.issubset(allowed_keys)` then fails permanently — the
+real hotkey combo can never satisfy an exact match again, silently, with nothing in the
+logs to point at.
+
+Fixed in `main.py`'s `on_transcription_complete`: `key_listener.stop()` immediately
+before `typewrite()`, `key_listener.start()` immediately after — the app never hears its
+own synthesized keystrokes at all, for either `recording_mode` (a bare `start()` after
+typewrite covers `continuous` mode too, which previously relied on the listener never
+having been stopped in the first place to keep working through the gap between cycles).
+
+If this resurfaces: the immediate recovery is restarting the app (clears
+`KeyChord.pressed_keys`); the app has no way to detect or self-heal a stuck key from
+inside a live process.
+
 ## Single-instance enforcement (2026-09-01)
 
 Nothing stopped multiple copies of WhisperWriter from running at once (e.g. launching

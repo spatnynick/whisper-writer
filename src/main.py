@@ -313,15 +313,24 @@ class WhisperWriterApp(QObject):
         self.last_transcript = result
         self.copy_last_transcript_action.setEnabled(bool(result))
 
+        # Stop listening while typing: pynput's global listener also observes the
+        # synthetic keystrokes typewrite() injects (well-documented pynput behavior —
+        # an XTest-injected event is indistinguishable from a real one to the XRecord
+        # hook the listener uses). Left running, a dropped/reordered synthetic
+        # press-or-release — more likely the longer and more punctuated the transcript,
+        # so it can take a while to hit — can leave a stray key marked "pressed" in
+        # KeyChord.pressed_keys forever, permanently failing the chord's exact-match
+        # check (see fix #2 in FORK_NOTES.md) until the app is restarted, with the
+        # activation hotkey silently never firing again.
+        self.key_listener.stop()
         self.input_simulator.typewrite(result)
+        self.key_listener.start()
 
         if ConfigManager.get_config_value('misc', 'noise_on_completion'):
             AudioPlayer(os.path.join('assets', 'beep.wav')).play(block=True)
 
         if ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous':
             self.start_result_thread()
-        else:
-            self.key_listener.start()
 
     def run(self):
         """
