@@ -3,7 +3,8 @@ import sys
 import time
 from audioplayer import AudioPlayer
 from pynput.keyboard import Controller
-from PyQt5.QtCore import QObject, QProcess
+from PyQt5.QtCore import QObject, QProcess, QTimer, pyqtSlot
+from PyQt5.QtDBus import QDBusConnection
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QAction, QMessageBox, QStyle
 
@@ -41,6 +42,44 @@ class WhisperWriterApp(QObject):
         else:
             print('No valid configuration file found. Opening settings window...')
             self.settings_window.show()
+
+        self._setup_sleep_resume_watcher()
+
+    def _setup_sleep_resume_watcher(self):
+        """
+        pynput's X11 hotkey listener can go stale across a suspend/resume cycle (the
+        underlying Xlib connection doesn't reliably recover on its own), silently killing the
+        activation hotkey until the app is restarted by hand. Watch logind's PrepareForSleep
+        signal and restart the key listener a couple of seconds after resume (arg == False) to
+        give X11 time to come back up first.
+        """
+        bus = QDBusConnection.systemBus()
+        if not bus.isConnected():
+            print('Could not connect to system D-Bus; hotkey listener will not auto-recover after suspend.')
+            return
+        connected = bus.connect(
+            'org.freedesktop.login1',
+            '/org/freedesktop/login1',
+            'org.freedesktop.login1.Manager',
+            'PrepareForSleep',
+            self.on_prepare_for_sleep
+        )
+        if not connected:
+            print('Could not subscribe to logind PrepareForSleep; hotkey listener will not auto-recover after suspend.')
+
+    @pyqtSlot(bool)
+    def on_prepare_for_sleep(self, going_to_sleep: bool):
+        """Called by logind before suspend (True) and again after resume (False)."""
+        if going_to_sleep:
+            return
+        QTimer.singleShot(2000, self._restart_key_listener_after_resume)
+
+    def _restart_key_listener_after_resume(self):
+        if not getattr(self, 'key_listener', None):
+            return
+        print('Resumed from sleep — restarting hotkey listener.')
+        self.key_listener.stop()
+        self.key_listener.start()
 
     def initialize_components(self):
         """

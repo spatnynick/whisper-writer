@@ -332,6 +332,35 @@ Fixed with dirty-tracking + a per-setting `live_reload` schema flag:
     caching a value at `__init__`/construction time — mislabeling something as live-reload-safe
     will make a save silently apply nothing until the next real restart.
 
+## Hotkey stops working after suspend/resume (2026-09-01)
+
+`pynput`'s X11 listener (`PynputBackend`) doesn't reliably survive a suspend/resume cycle — the
+underlying Xlib connection goes stale and the activation hotkey silently stops firing, with no
+crash and no error (the app *looks* fine: tray icon still there). Only a full app restart used
+to bring it back.
+
+Fixed in `src/main.py` (`WhisperWriterApp._setup_sleep_resume_watcher`): subscribes to
+`org.freedesktop.login1.Manager`'s `PrepareForSleep` D-Bus signal on the system bus via
+`PyQt5.QtDBus` (already bundled with PyQt5, no new dependency). `PrepareForSleep(true)` fires
+just before suspend (ignored); `PrepareForSleep(false)` fires just after resume, and 2 seconds
+later (giving X11 time to actually be back) the key listener is torn down and restarted
+(`key_listener.stop()` + `key_listener.start()`). Safe to call repeatedly — `PynputBackend.start()`
+already calls `self.stop()` first and builds fresh `pynput.keyboard.Listener`/`mouse.Listener`
+objects every time (see the `#148` backport above), so this is a clean reconnect, not a
+best-effort nudge.
+
+`QDBusConnection.connect()`'s `service` argument filters by the signal's actual sender identity
+(resolved against who currently owns that well-known bus name) — only the real `systemd-logind`
+process owns `org.freedesktop.login1`, so a spoofed `dbus-send` signal from an unprivileged
+process is correctly ignored, which also means this can't be smoke-tested by faking the signal;
+only a real suspend/resume cycle exercises the actual path. Verified: the D-Bus subscribe itself
+succeeds at startup (no "Could not subscribe" console message) and the signal is confirmed
+reaching the system bus in general (via `dbus-monitor`).
+
+**Gotcha:** the slot passed to `QDBusConnection.connect()` must be decorated `@pyqtSlot(bool)` —
+without it, `connect()` raises `TypeError: callable must be a method of a QtCore.QObject
+instance decorated by QtCore.pyqtSlot` immediately at startup.
+
 ## Pulling upstream changes later
 
 ```
