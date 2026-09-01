@@ -1,4 +1,5 @@
 import logging
+import time
 from abc import ABC, abstractmethod
 from enum import Enum, auto
 from typing import Callable, Optional, Set
@@ -250,19 +251,55 @@ class KeyChord:
     Represents a combination of keys that need to be pressed simultaneously.
     """
 
+    # How long a tracked key that isn't part of this chord may sit "pressed" before it's
+    # assumed to be a lost release event rather than a real held key, and dropped. See
+    # _purge_stale_extras.
+    STALE_EXTRA_KEY_SECONDS = 5.0
+
     def __init__(self, keys: Set[KeyCode | frozenset[KeyCode]]):
         """Initialize the KeyChord."""
         self.keys = keys
         self.pressed_keys: Set[KeyCode] = set()
+        self.pressed_at = {}
+        self._chord_keys = set()
+        for key in keys:
+            if isinstance(key, frozenset):
+                self._chord_keys.update(key)
+            else:
+                self._chord_keys.add(key)
 
     def update(self, key: KeyCode, event_type: InputEvent) -> bool:
         """Update the state of pressed keys and check if the chord is active."""
+        self._purge_stale_extras()
+
         if event_type == InputEvent.KEY_PRESS:
             self.pressed_keys.add(key)
+            self.pressed_at[key] = time.monotonic()
         elif event_type == InputEvent.KEY_RELEASE:
             self.pressed_keys.discard(key)
+            self.pressed_at.pop(key, None)
 
         return self.is_active()
+
+    def _purge_stale_extras(self):
+        """
+        Self-healing safety net: a key outside this chord's own combination that's been
+        "pressed" for implausibly long is almost certainly a lost/reordered release event
+        (see FORK_NOTES.md, "Hotkey silently stops firing after a while") rather than a
+        real held key, and — left tracked — would permanently fail is_active()'s exact-match
+        check. Chord keys themselves are exempt: hold_to_record legitimately holds them for
+        as long as the user dictates, which can be arbitrarily long.
+        """
+        now = time.monotonic()
+        stale = [
+            key for key in self.pressed_keys
+            if key not in self._chord_keys
+            and now - self.pressed_at.get(key, now) > self.STALE_EXTRA_KEY_SECONDS
+        ]
+        for key in stale:
+            logger.debug(f"key event: dropping stale extra key {key} (likely a lost release event)")
+            self.pressed_keys.discard(key)
+            self.pressed_at.pop(key, None)
 
     def is_active(self) -> bool:
         """Check if exactly the keys in the chord are currently pressed (no extras)."""

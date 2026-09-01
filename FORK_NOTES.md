@@ -468,9 +468,64 @@ own synthesized keystrokes at all, for either `recording_mode` (a bare `start()`
 typewrite covers `continuous` mode too, which previously relied on the listener never
 having been stopped in the first place to keep working through the gap between cycles).
 
-If this resurfaces: the immediate recovery is restarting the app (clears
-`KeyChord.pressed_keys`); the app has no way to detect or self-heal a stuck key from
-inside a live process.
+**Recurred the same day**, ~45 minutes after the fix above, with no suspend/resume in
+between and the fixed code confirmed loaded — so the `typewrite()` self-feedback path
+above wasn't the only way to lose a release event; something else on the X11/pynput side
+can apparently drop one too. Root-caused this specific mechanism further, but ran out of
+appetite to chase every possible source of a lost X11 event one at a time.
+
+Instead, made the failure mode self-healing regardless of *how* a release gets lost:
+`KeyChord` now stamps each pressed key with `time.monotonic()`
+(`KeyChord.pressed_at`) and, on every `update()` call, drops any tracked key that (a)
+isn't part of the chord's own configured combination and (b) has sat "pressed" for over
+`STALE_EXTRA_KEY_SECONDS` (5s) — almost certainly a lost release, not a real hold. Chord
+keys themselves (e.g. `ctrl`, `shift`, `space` for the default combo) are exempt from the
+purge, since `hold_to_record` mode legitimately holds them for as long as the user
+dictates. Purge runs lazily at the top of `update()`, so it doesn't need a background
+timer: the very next real key event (the user's next hotkey attempt) triggers the purge
+and immediately unblocks it, faster in practice than waiting out the 5s idle. Verified
+directly against `KeyChord` (no live X11 needed): a stray stuck key correctly blocks the
+chord immediately after, then the same combo succeeds again once the staleness window has
+passed.
+
+The `key_listener.stop()`/`start()` bracket around `typewrite()` (above) is still worth
+keeping — it closes off a real, understood leak — but it's now defense-in-depth, not the
+only thing standing between a lost event and a dead hotkey.
+
+If this resurfaces *despite* the self-heal: that would mean either a chord key itself
+(not an extra) is getting stuck — which the purge deliberately doesn't touch, so would
+need actual investigation — or the loss is happening faster/more often than the 5s window
+assumes. Restarting the app is still the fallback; `KeyChord.pressed_keys` doesn't persist
+across process restarts.
+
+## Open idea: consume Escape during recording instead of leaking it (2026-09-01, not implemented)
+
+Reported: pressing Escape to cancel a recording also reaches whatever app has focus (e.g.
+closes a dialog, exits an editor mode) — WhisperWriter reacts to it but doesn't stop it
+from propagating further.
+
+Why it leaks: `PynputBackend` listens via X11's XRecord extension, which only *monitors*
+events server-wide — it has no ability to consume/suppress them. Escape always reaches
+the focused window regardless of what WhisperWriter does with it.
+
+Sketched but deliberately not built (explicitly deferred by request, low priority — "not a
+must have"): a dynamic X11 *active key grab* (`XGrabKey` via `python-xlib`, already a
+transitive dependency through pynput's X11 backend) on Escape, installed only while a
+recording is actually in progress (tied to the existing `on_status_changed` 'recording'
+transition in `main.py`) and removed the instant it ends. An active grab makes the X
+server deliver the matched key only to the grabbing client, never to the focused window —
+this is the same mechanism global-hotkey managers use. Grabbing Escape *permanently*
+instead of only during recording was explicitly ruled out: it would swallow Escape in
+every other app system-wide (breaking dialogs, vim insert mode, etc.) any time
+WhisperWriter isn't even recording — a much worse regression than the current leak.
+
+Complexity if picked up later: moderate. Needs its own `Xlib.display.Display()` connection
+and event-loop thread (grabbed-key events arrive via `next_event()`, not through the
+existing pynput/XRecord path), careful start/stop lifecycle so a grab can never outlive a
+recording (crash-safety: if the app dies mid-grab, X11 releases grabs held by a closed
+connection automatically, so no permanent-lockout risk there), and it's X11-only — fine
+here since this fork already assumes X11 throughout (XRecord, the D-Bus/logind
+suspend-resume watcher), just worth noting if a machine ever moves to Wayland.
 
 ## Single-instance enforcement (2026-09-01)
 
