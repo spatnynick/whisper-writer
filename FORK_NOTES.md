@@ -400,6 +400,29 @@ non-null (`transcription.py`: `... or glossary.build_initial_prompt()`).
 
 Requires `rapidfuzz` (prebuilt wheel, no apt dep — added to `requirements.txt`).
 
+## Syncing changes across the three machines (2026-09-01)
+
+`update.sh` (new, tracked, executable) — run `./update.sh` on any machine to pull the
+latest commits from `origin` and restart the running instance in one step. It:
+
+- Refuses to run if the working tree is dirty (never force-overwrites local edits).
+- `git fetch` + `git merge --ff-only` only — no auto-merge/rebase, so a diverged history
+  fails loudly instead of doing something surprising.
+- Re-installs `requirements.txt` into `venv/` only when that file actually changed between
+  the old and new HEAD (skips the pip step on ordinary code-only updates).
+- Finds the running instance via `pgrep -f "$install_dir/venv/bin/python3 src/main.py"`
+  (absolute path, so it can't match a whisper-writer process from a different install),
+  sends SIGTERM, waits up to 10s, force-kills if needed, then relaunches via `start.sh`
+  detached with `nohup`. If nothing was running, it just updates and exits — doesn't start
+  the app up on its own.
+- Wrapped in a `main()` called at the very end of the file — the standard self-updating-script
+  trick: bash reads the whole function into memory before running it, so `git pull` rewriting
+  the script out from under itself mid-run can't corrupt the in-flight execution.
+
+Not wired to systemd — this fork just runs as a plain background process launched by
+`start.sh` (via the KDE autostart entry or manually), so "restart" means kill + relaunch,
+not `systemctl restart`.
+
 ## Pulling upstream changes later
 
 ```
