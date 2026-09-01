@@ -361,6 +361,45 @@ reaching the system bus in general (via `dbus-monitor`).
 without it, `connect()` raises `TypeError: callable must be a method of a QtCore.QObject
 instance decorated by QtCore.pyqtSlot` immediately at startup.
 
+## SAP/ABAP/Linux glossary for prompting and correction (2026-09-01)
+
+`src/glossary.yaml` holds a domain term list (SAP modules, ABAP dev/transaction codes,
+SAP Basis/HANA, Linux server admin) plus a static mishear→correction map and a fuzzy-match
+config. Tracked in git (unlike `config.yaml`, which is gitignored/per-machine) so it syncs
+across all three machines on `git pull` — no per-machine setup needed.
+
+`src/glossary.py` loads it (module-level cache) and exposes:
+- `build_initial_prompt()` — flattens `categories` into a comma-joined string, capped at
+  800 chars (Whisper's `initial_prompt`/API `prompt` has a practical token limit; blowing
+  past it just gets silently truncated by the API anyway, so cap client-side instead).
+- `apply_glossary_corrections(text)` — runs after every transcription, in
+  `post_process_transcription()` (`src/transcription.py`). Two passes:
+  1. `static_map`: unconditional case-insensitive phrase replace (e.g. `"eye dock"` →
+     `"IDoc"`). Zero false-positive risk since these are exact phrases you've actually
+     seen mis-transcribed — extend this list empirically as you notice new mishears.
+  2. Fuzzy (via `rapidfuzz.fuzz.ratio`, single-word glossary terms only): only runs at all
+     if the transcription already contains one of `fuzzy.context_triggers` (sap, abap,
+     transaction, table, server, ...) — avoids "correcting" unrelated speech. Score must
+     be ≥ `fuzzy.max_distance_ratio` (0.90) to replace a word.
+
+**Gotcha found during testing:** short common words that are prefixes of longer glossary
+terms produce false-positive fuzzy matches even at high thresholds — e.g. `"system"` vs
+`"systemd"` scores 92.3%, `"table"` vs `"stable"` scores 90.9%, both above a naive 0.85–0.90
+cutoff. Char-level fuzzy ratio alone can't tell "correctly transcribed short word" from
+"mishearing of a longer term that starts the same way." Fixed by never fuzzy-correcting a
+word that is itself one of `fuzzy.context_triggers` — those are already known-valid
+vocabulary, not candidates for correction, and this happens to cover exactly the collision
+cases found (`system`, `table`, `report` are all triggers *and* prefixes of glossary terms).
+This doesn't fully solve the general case (an unrelated real word that happens to be within
+one edit of some glossary term and isn't a trigger could still misfire) — mitigated by
+gating on triggers in the first place and keeping the threshold at 0.90, not lower.
+
+Config path if you want per-machine override: `model_options.common.initial_prompt` in
+`config.yaml` still exists and takes precedence over the glossary-built prompt if set
+non-null (`transcription.py`: `... or glossary.build_initial_prompt()`).
+
+Requires `rapidfuzz` (prebuilt wheel, no apt dep — added to `requirements.txt`).
+
 ## Pulling upstream changes later
 
 ```

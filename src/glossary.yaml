@@ -1,0 +1,160 @@
+# Domain glossary for transcription prompting and post-processing correction.
+# Tracked in git (unlike config.yaml) so it syncs across machines via `git pull`.
+#
+# categories: flattened into the Whisper/speaches `initial_prompt` (see glossary.py).
+# static_map: exact-phrase replacements applied unconditionally after transcription.
+# fuzzy: near-match correction against category terms, gated by context_triggers.
+
+categories:
+  sap_modules:
+    - SAP
+    - ABAP
+    - BASIS
+    - FI
+    - CO
+    - MM
+    - SD
+    - PP
+    - QM
+    - PM
+    - WM
+    - EWM
+    - HCM
+    - BW
+    - BI
+    - PI
+    - PO
+    - S/4HANA
+    - ECC
+    - NetWeaver
+    - Fiori
+    - HANA
+    - SuccessFactors
+    - Ariba
+
+  abap_dev:
+    - transaction
+    - BAPI
+    - IDoc
+    - RFC
+    - BAdI
+    - user exit
+    - enhancement point
+    - SPRO
+    - SE80
+    - SE11
+    - SE37
+    - SE38
+    - ALV
+    - dictionary
+    - workbench
+    - Z-report
+    - Z-table
+    - function module
+    - data element
+    - domain
+    - structure
+    - internal table
+    - work area
+    - smart forms
+    - module pool
+    - screen painter
+    - OSS note
+    - transport request
+    - package
+    - class
+    - method
+    - interface
+    - CDS view
+    - AMDP
+    - oData
+    - batch input
+    - LSMW
+    - ALE
+    - EDI
+    - STMS
+    - mandant
+    - customizing request
+
+  sap_basis_hana:
+    - hdbsql
+    - saphostagent
+    - sapstartsrv
+    - sapinst
+    - HANA studio
+    - HANA backup
+    - SAP kernel
+    - work process
+    - dispatcher
+    - message server
+    - gateway
+    - ICM
+    - profile parameter
+    - SM21
+    - ST22
+    - SM37
+    - SM50
+    - SM66
+
+  linux_admin:
+    - systemd
+    - systemctl
+    - journalctl
+    - syslog
+    - rsyslog
+    - crontab
+    - fstab
+    - LVM
+    - RAID
+    - NFS
+    - SSH
+    - rsync
+    - iptables
+    - firewalld
+    - SELinux
+    - sudo
+    - chmod
+    - chown
+    - symlink
+    - kernel
+    - swap
+    - hostname
+    - netstat
+    - tcpdump
+    - cgroup
+    - namespace
+    - Docker
+    - Kubernetes
+    - kubectl
+    - Pacemaker
+    - Corosync
+    - multipath
+    - SAN
+    - LUN
+    - ext4
+    - XFS
+
+static_map:
+  "eye dock": "IDoc"
+  "eye docs": "IDocs"
+  "bappy": "BAPI"
+  "bappies": "BAPIs"
+  "s a p": "SAP"
+  "a bap": "ABAP"
+  "hana": "HANA"
+  "essap": "S/4HANA"
+  "es for hana": "S/4HANA"
+
+fuzzy:
+  enabled: true
+  max_distance_ratio: 0.9
+  context_triggers:
+    - sap
+    - abap
+    - transaction
+    - module
+    - report
+    - table
+    - server
+    - system
+    - transport

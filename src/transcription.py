@@ -8,6 +8,7 @@ from faster_whisper import WhisperModel
 from openai import OpenAI
 
 from utils import ConfigManager
+import glossary
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ def transcribe_local(audio_data, local_model=None):
 
     response = local_model.transcribe(audio=audio_data_float,
                                       language=model_options['common']['language'],
-                                      initial_prompt=model_options['common']['initial_prompt'],
+                                      initial_prompt=model_options['common']['initial_prompt'] or glossary.build_initial_prompt(),
                                       condition_on_previous_text=model_options['local']['condition_on_previous_text'],
                                       temperature=model_options['common']['temperature'],
                                       vad_filter=model_options['local']['vad_filter'],)
@@ -88,7 +89,7 @@ def transcribe_api(audio_data):
         model=model_options['api']['model'],
         file=('audio.wav', byte_io, 'audio/wav'),
         language=model_options['common']['language'],
-        prompt=model_options['common']['initial_prompt'],
+        prompt=model_options['common']['initial_prompt'] or glossary.build_initial_prompt(),
         temperature=model_options['common']['temperature'],
     )
     logger.debug(f"transcribe_api: HTTP call took {time.time() - start:.3f}s")
@@ -99,6 +100,7 @@ def post_process_transcription(transcription):
     Apply post-processing to the transcription.
     """
     transcription = transcription.strip()
+    transcription = glossary.apply_glossary_corrections(transcription)
     post_processing = ConfigManager.get_config_section('post_processing')
     if post_processing['remove_trailing_period'] and transcription.endswith('.'):
         transcription = transcription[:-1]
