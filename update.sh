@@ -48,11 +48,15 @@ main() {
         exit 1
     fi
 
-    if ! git diff --quiet "$old_head" "$new_head" -- requirements.txt; then
-        echo "requirements.txt changed — updating venv..."
-        venv/bin/pip install -q --upgrade pip
-        venv/bin/pip install -q -r requirements.txt
-    fi
+    # Always reconcile the venv against requirements.txt, not just when it textually
+    # changed in this pull — a venv can drift out of sync with a committed
+    # requirements.txt for reasons this script can't see (a manual `git pull`/rebase
+    # done outside update.sh, a previous run interrupted mid-install, a venv rebuilt
+    # from an older checkout, etc). pip is idempotent and fast when nothing is missing,
+    # so the safety net costs a couple of seconds even on a no-op update.
+    echo "Reconciling venv against requirements.txt..."
+    venv/bin/pip install -q --upgrade pip
+    venv/bin/pip install -q -r requirements.txt
 
     echo "Update complete."
 

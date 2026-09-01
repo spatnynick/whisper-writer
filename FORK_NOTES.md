@@ -408,13 +408,12 @@ latest commits from `origin` and restart the running instance in one step. It:
 - Refuses to run if the working tree is dirty (never force-overwrites local edits).
 - `git fetch` + `git merge --ff-only` only — no auto-merge/rebase, so a diverged history
   fails loudly instead of doing something surprising.
-- Re-installs `requirements.txt` into `venv/` only when that file actually changed between
-  the old and new HEAD (skips the pip step on ordinary code-only updates).
-- Finds the running instance via `pgrep -f "$install_dir/venv/bin/python3 src/main.py"`
-  (absolute path, so it can't match a whisper-writer process from a different install),
-  sends SIGTERM, waits up to 10s, force-kills if needed, then relaunches via `start.sh`
-  detached with `nohup`. If nothing was running, it just updates and exits — doesn't start
-  the app up on its own.
+- Always runs `pip install -r requirements.txt` against `venv/` on every update (not
+  conditionally — see incident below), then finds the running instance via
+  `pgrep -f "$install_dir/venv/bin/python3 src/main.py"` (absolute path, so it can't match
+  a whisper-writer process from a different install), sends SIGTERM, waits up to 10s,
+  force-kills if needed, then relaunches via `start.sh` detached with `nohup`. If nothing
+  was running, it just updates and exits — doesn't start the app up on its own.
 - Wrapped in a `main()` called at the very end of the file — the standard self-updating-script
   trick: bash reads the whole function into memory before running it, so `git pull` rewriting
   the script out from under itself mid-run can't corrupt the in-flight execution.
@@ -422,6 +421,20 @@ latest commits from `origin` and restart the running instance in one step. It:
 Not wired to systemd — this fork just runs as a plain background process launched by
 `start.sh` (via the KDE autostart entry or manually), so "restart" means kill + relaunch,
 not `systemctl restart`.
+
+**Incident, same day:** the first version of `update.sh` only ran `pip install -r
+requirements.txt` when that file textually differed between the pull's old and new HEAD.
+While adding the script itself, a manual `git pull --rebase` (done outside `update.sh`, to
+get the new script committed on top of two just-fetched upstream commits) landed the SAP
+glossary commit's new `rapidfuzz` dependency in `requirements.txt` without ever installing
+it into the venv. Running `start.sh` afterwards crashed with
+`ModuleNotFoundError: No module named 'rapidfuzz'` (`src/glossary.py` imports it). The venv
+had silently drifted out of sync with a committed `requirements.txt`, and the diff-based
+check had no way to catch it since it only trusts its own pull's before/after — not the
+actual installed state. Fixed by making the reinstall unconditional: `pip` no-ops quickly
+when everything's already satisfied, so always reconciling costs a couple of seconds and
+removes this whole class of bug (also covers a venv rebuilt from an older checkout, or a
+previous `update.sh` run interrupted mid-install).
 
 ## Pulling upstream changes later
 
