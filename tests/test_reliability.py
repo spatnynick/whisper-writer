@@ -44,6 +44,8 @@ class ReliabilityTests(unittest.TestCase):
         app._shutdown_action = None
         app._continue_recording = False
         app._update_process = None
+        app._model_press_count = 0
+        app.active_model_name = None
         app.local_model = None
         app.result_thread = None
         app.current_status = 'idle'
@@ -259,20 +261,33 @@ class ReliabilityTests(unittest.TestCase):
             base_url = settings.findChild(QLineEdit, 'model_options_api_base_url_input')
             model_container = settings.findChild(QWidget, 'model_options_api_model_input')
             model_combo = settings.findChild(QComboBox, 'model_options_api_model_selector')
+            secondary_container = settings.findChild(QWidget, 'model_options_api_secondary_model_input')
+            secondary_combo = settings.findChild(QComboBox, 'model_options_api_secondary_model_selector')
             prompt = settings.findChild(QTextEdit, 'model_options_common_initial_prompt_input')
             prompt_link = settings.findChild(QLabel, 'model_options_common_initial_prompt_link')
             self.assertIsNotNone(base_url)
             self.assertIsNotNone(model_container)
             self.assertIsNotNone(model_combo)
+            self.assertIsNotNone(secondary_container)
+            self.assertIsNotNone(secondary_combo)
             self.assertIsNotNone(prompt)
             self.assertIsNotNone(prompt_link)
             self.assertTrue(model_combo.isEditable())
+            self.assertTrue(secondary_combo.isEditable())
             self.assertEqual(settings.get_widget_value_typed(model_container, 'str'), 'whisper-1')
+            self.assertIsNone(settings.get_widget_value_typed(secondary_container, 'str'))
             self.assertIsNone(settings.get_widget_value_typed(prompt, 'str'))
             self.assertTrue(prompt_link.openExternalLinks())
             self.assertGreater(prompt.geometry().top(), settings.height() // 3)
             api_order = list(ConfigManager.get_schema()['model_options']['api'])
             self.assertLess(api_order.index('base_url'), api_order.index('model'))
+            self.assertLess(api_order.index('model'), api_order.index('secondary_model'))
+
+            model_combo.setCurrentText('selected-primary')
+            secondary_combo.setCurrentText('selected-secondary')
+            settings._replace_api_model_options(['remote-one', 'remote-two'])
+            self.assertEqual(model_combo.currentText(), 'selected-primary')
+            self.assertEqual(secondary_combo.currentText(), 'selected-secondary')
         finally:
             settings.reset_settings()
             settings.close()
@@ -340,7 +355,7 @@ class ReliabilityTests(unittest.TestCase):
 
     def test_failed_transcription_retains_audio_and_original_rate(self):
         data = np.ones(1600, dtype=np.int16)
-        worker = ResultThread(audio_data=data, sample_rate=8000)
+        worker = ResultThread(audio_data=data, sample_rate=8000, model_name='secondary-model')
         failures = []
         worker.failedAudioSignal.connect(failures.append)
         with patch('result_thread.transcribe', side_effect=RuntimeError('network down')), patch('result_thread.traceback.print_exc'), patch.object(worker, '_record_audio') as record:
@@ -349,6 +364,7 @@ class ReliabilityTests(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIs(failures[0][0], data)
         self.assertEqual(failures[0][1], 8000)
+        self.assertEqual(failures[0][2], 'secondary-model')
         self.assertFalse(worker.transcription_succeeded)
 
     def test_retry_uses_saved_audio_without_microphone(self):
@@ -391,6 +407,40 @@ class ReliabilityTests(unittest.TestCase):
         app.update_tray_icon('idle')
         app.tray_icon.setIcon.assert_called_with(app.tray_icon_error)
         self.assertIn('retry available', app.tray_icon.setToolTip.call_args.args[0])
+
+    def test_model_selection_alternates_across_activation_presses(self):
+        app = self.app()
+        ConfigManager.set_config_value(True, 'model_options', 'use_api')
+        ConfigManager.set_config_value('primary-model', 'model_options', 'api', 'model')
+        ConfigManager.set_config_value('secondary-model', 'model_options', 'api', 'secondary_model')
+
+        with patch.object(app, '_start_worker') as start:
+            app.on_activation()
+            first_worker = start.call_args.args[0]
+        self.assertEqual(first_worker.model_name, 'primary-model')
+        self.assertEqual(app.active_model_name, 'primary-model')
+
+        app.result_thread = Mock()
+        app.result_thread.isRunning.return_value = True
+        app.current_status = 'recording'
+        app.on_activation()
+        self.assertEqual(app.active_model_name, 'secondary-model')
+        self.assertEqual(app.result_thread.model_name, 'secondary-model')
+        self.assertIn('Model: secondary-model', app.tray_icon.setToolTip.call_args.args[0])
+        app.result_thread.stop_recording.assert_called_once()
+
+        app.result_thread = None
+        app.current_status = 'idle'
+        with patch.object(app, '_start_worker') as start:
+            app.on_activation()
+            third_worker = start.call_args.args[0]
+        self.assertEqual(third_worker.model_name, 'primary-model')
+
+        app.result_thread = Mock()
+        app.result_thread.isRunning.return_value = True
+        app.current_status = 'recording'
+        app.on_activation()
+        self.assertEqual(app.active_model_name, 'secondary-model')
 
     def test_next_recording_discards_previous_failed_audio(self):
         app = self.app()
@@ -511,7 +561,21 @@ class ReliabilityTests(unittest.TestCase):
             self.assertEqual(client.call_args.kwargs['api_key'], 'not-needed')
             self.assertEqual(client.call_args.kwargs['max_retries'], 0)
             self.assertEqual(client.call_args.kwargs['timeout'], 120)
+            self.assertEqual(client.return_value.__enter__.return_value.audio.transcriptions.create.call_args.kwargs['model'], 'whisper-1')
             client.return_value.__exit__.assert_called_once()
+
+    def test_api_transcription_uses_selected_model_override(self):
+        ConfigManager.set_config_value('http://localhost:1234/v1', 'model_options', 'api', 'base_url')
+        with patch.dict(os.environ, {'OPENAI_API_KEY': ''}), patch('transcription.OpenAI') as client:
+            client.return_value.__enter__.return_value.audio.transcriptions.create.return_value.text = 'ok'
+            self.assertEqual(
+                transcription.transcribe_api(np.zeros(1600, dtype=np.int16), model_name='secondary-model'),
+                'ok',
+            )
+            self.assertEqual(
+                client.return_value.__enter__.return_value.audio.transcriptions.create.call_args.kwargs['model'],
+                'secondary-model',
+            )
 
 if __name__ == '__main__':
     unittest.main()

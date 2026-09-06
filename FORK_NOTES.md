@@ -30,8 +30,12 @@ defaults to 120 seconds of HTTP inactivity; increase it in Settings for a slower
 Settings places the API base URL before an editable model dropdown. Changing the URL or
 pressing **Refresh** loads model IDs from the endpoint's OpenAI-compatible `/models` route
 without blocking the window; if discovery is unavailable, the model can still be typed
-manually. The common initial prompt is a separated multi-line editor with a clickable link
-to OpenAI's prompting guide.
+manually. The API settings include separate primary and optional secondary model selectors;
+the last selected value is preserved through refreshes and when Settings is reopened. With
+both configured, activation presses alternate primary, secondary, primary, secondary. The
+active model appears in the tray tooltip and the status popup while recording/transcribing.
+The common initial prompt is a separated multi-line editor with a clickable link to OpenAI's
+prompting guide.
 Requests are not retried automatically. Exit/settings restart waits for active worker work
 without blocking Qt; a native model call still has to finish. Complete dictation before an
 external process restart/update, which terminates in-flight work.
@@ -188,6 +192,7 @@ model_options:
     api_key: null
     base_url: http://192.168.98.3:8100/v1
     model: deepdml/faster-whisper-large-v3-turbo-ct2
+    secondary_model: null
   common:
     initial_prompt: null
     language: null

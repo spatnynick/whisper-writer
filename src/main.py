@@ -44,6 +44,8 @@ class WhisperWriterApp(QObject):
         self._shutdown_action = None
         self._continue_recording = False
         self._update_process = None
+        self._model_press_count = 0
+        self.active_model_name = None
         self.activationRequested.connect(self.on_activation, Qt.QueuedConnection)
         self.deactivationRequested.connect(self.on_deactivation, Qt.QueuedConnection)
         self.cancelRequested.connect(self.on_cancel_key, Qt.QueuedConnection)
@@ -297,21 +299,25 @@ class WhisperWriterApp(QObject):
         """
         if status in ('idle', 'error', 'cancel') and self.failed_recordings:
             status = 'error'
+        active_model = getattr(self, 'active_model_name', None)
+        model_suffix = ''
+        if status in ('recording', 'transcribing', 'error') and active_model:
+            model_suffix = f'\nModel: {active_model}'
         if status != 'error' and not ConfigManager.get_config_value('misc', 'show_tray_status_icon'):
             self.tray_icon.setIcon(self.tray_icon_idle)
-            self.tray_icon.setToolTip('WhisperWriter')
+            self.tray_icon.setToolTip(f'WhisperWriter{model_suffix}')
             return
 
         if status == 'recording':
             self.tray_icon.setIcon(self.tray_icon_recording)
-            self.tray_icon.setToolTip('WhisperWriter — Recording...')
+            self.tray_icon.setToolTip(f'WhisperWriter — Recording...{model_suffix}')
         elif status == 'transcribing':
             self.tray_icon.setIcon(self.tray_icon_transcribing)
-            self.tray_icon.setToolTip('WhisperWriter — Transcribing...')
+            self.tray_icon.setToolTip(f'WhisperWriter — Transcribing...{model_suffix}')
         elif status == 'error':
             self.tray_icon.setIcon(self.tray_icon_error)
             suffix = ' — retry available' if self.failed_recordings else ''
-            self.tray_icon.setToolTip(f'WhisperWriter — Error{suffix}')
+            self.tray_icon.setToolTip(f'WhisperWriter — Error{suffix}{model_suffix}')
         elif status in ('idle', 'cancel'):
             self.tray_icon.setIcon(self.tray_icon_idle)
             self.tray_icon.setToolTip('WhisperWriter — Idle')
@@ -327,13 +333,51 @@ class WhisperWriterApp(QObject):
             self.failed_recordings[:] = [recording]
         self._update_retry_actions()
 
+    def _configured_model_pair(self):
+        """Return the configured primary and optional secondary model for this backend."""
+        options = ConfigManager.get_config_section('model_options')
+        if options.get('use_api'):
+            api_options = options.get('api', {})
+            primary = api_options.get('model')
+            secondary = api_options.get('secondary_model')
+        else:
+            local_options = options.get('local', {})
+            primary = local_options.get('model')
+            secondary = None
+        return primary, secondary
+
+    def _model_for_next_press(self):
+        """Alternate the selected model on accepted activation presses."""
+        primary, secondary = self._configured_model_pair()
+        press_count = getattr(self, '_model_press_count', 0)
+        use_secondary = press_count % 2 == 1 and secondary
+        self._model_press_count = press_count + 1
+        return secondary if use_secondary else primary
+
+    def _set_active_model(self, model_name):
+        """Set the model snapshot shown by the tray/status indicators and worker."""
+        self.active_model_name = model_name
+        if getattr(self, 'result_thread', None):
+            self.result_thread.model_name = model_name
+        if getattr(self, 'status_window', None):
+            self.status_window.set_model(model_name)
+        if getattr(self, 'tray_icon', None) and getattr(self, 'current_status', None):
+            self.update_tray_icon(self.current_status)
+
     def retry_transcription(self):
         if not self.failed_recordings or self.result_thread is not None or self._shutdown_action:
             return
-        audio_data, sample_rate = self.failed_recordings[0]
+        recording = self.failed_recordings[0]
+        audio_data, sample_rate = recording[:2]
+        model_name = recording[2] if len(recording) > 2 else getattr(self, 'active_model_name', None)
         self._retrying = True
         self._continue_recording = False
-        self._start_worker(ResultThread(self.local_model, audio_data=audio_data, sample_rate=sample_rate))
+        self._start_worker(ResultThread(
+            self.local_model,
+            audio_data=audio_data,
+            sample_rate=sample_rate,
+            model_name=model_name,
+        ))
 
     def copy_last_transcript(self):
         """
@@ -414,6 +458,8 @@ class WhisperWriterApp(QObject):
         Called when the activation key combination is pressed.
         """
         if self.result_thread and self.result_thread.isRunning():
+            if self.current_status == 'recording':
+                self._set_active_model(self._model_for_next_press())
             recording_mode = ConfigManager.get_config_value('recording_options', 'recording_mode')
             if recording_mode == 'press_to_toggle':
                 self.result_thread.stop_recording()
@@ -422,7 +468,7 @@ class WhisperWriterApp(QObject):
             return
 
         self._continue_recording = ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous'
-        self.start_result_thread()
+        self.start_result_thread(model_name=self._model_for_next_press())
 
     def on_deactivation(self):
         """
@@ -432,7 +478,7 @@ class WhisperWriterApp(QObject):
             if self.result_thread and self.result_thread.isRunning():
                 self.result_thread.stop_recording()
 
-    def start_result_thread(self):
+    def start_result_thread(self, model_name=None):
         """
         Start the result thread to record audio and transcribe it.
         """
@@ -441,10 +487,16 @@ class WhisperWriterApp(QObject):
 
         # Starting a new recording explicitly abandons the previous failed audio.
         self.failed_recordings.clear()
-        self._start_worker(ResultThread(self.local_model))
+        if model_name is None:
+            model_name = self._model_for_next_press()
+        self._set_active_model(model_name)
+        self._start_worker(ResultThread(self.local_model, model_name=model_name))
 
     def _start_worker(self, worker):
         self.result_thread = worker
+        self._set_active_model(worker.model_name or self.active_model_name)
+        if getattr(self, 'status_window', None):
+            self.status_window.set_model(self.active_model_name)
         self._update_retry_actions()
         if not ConfigManager.get_config_value('misc', 'hide_status_window'):
             self.result_thread.statusSignal.connect(self.status_window.updateStatus)
@@ -499,7 +551,7 @@ class WhisperWriterApp(QObject):
         if self._shutdown_action:
             self._finish_shutdown()
         elif self._continue_recording:
-            self.start_result_thread()
+            self.start_result_thread(model_name=getattr(self, 'active_model_name', None))
         else:
             self.on_status_changed('idle')
             self.update_tray_icon('idle')

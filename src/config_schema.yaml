@@ -29,7 +29,11 @@ model_options:
     model:
       value: whisper-1
       type: str
-      description: "The transcription model. Use the dropdown after refreshing the models available at the configured base URL, or enter a model name manually."
+      description: "Primary transcription model. Use the dropdown after refreshing the models available at the configured base URL, or enter a model name manually."
+    secondary_model:
+      value: null
+      type: str
+      description: "Optional secondary transcription model. Shortcut presses alternate between the primary and secondary model; leave empty to use the primary every time."
     timeout_seconds:
       value: 120
       type: int

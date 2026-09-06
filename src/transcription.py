@@ -71,7 +71,7 @@ def transcribe_local(audio_data, local_model=None, sample_rate=None):
                                       vad_filter=model_options['local']['vad_filter'],)
     return ''.join([segment.text for segment in list(response[0])])
 
-def transcribe_api(audio_data, sample_rate=None):
+def transcribe_api(audio_data, sample_rate=None, model_name=None):
     """
     Transcribe an audio file using the OpenAI API.
     """
@@ -92,7 +92,7 @@ def transcribe_api(audio_data, sample_rate=None):
                 timeout=model_options['api'].get('timeout_seconds', 120),
                 max_retries=0) as client:
         response = client.audio.transcriptions.create(
-            model=model_options['api']['model'],
+            model=model_name or model_options['api']['model'],
             file=('audio.wav', byte_io, 'audio/wav'),
             language=model_options['common']['language'],
             prompt=model_options['common']['initial_prompt'] or glossary.build_initial_prompt(),
@@ -117,7 +117,7 @@ def post_process_transcription(transcription):
 
     return transcription
 
-def transcribe(audio_data, local_model=None, sample_rate=None):
+def transcribe(audio_data, local_model=None, sample_rate=None, model_name=None):
     """
     Transcribe audio date using the OpenAI API or a local model, depending on config.
     """
@@ -125,9 +125,11 @@ def transcribe(audio_data, local_model=None, sample_rate=None):
         return ''
 
     if ConfigManager.get_config_value('model_options', 'use_api'):
-        transcription = transcribe_api(audio_data, sample_rate=sample_rate)
+        if model_name is None:
+            transcription = transcribe_api(audio_data, sample_rate=sample_rate)
+        else:
+            transcription = transcribe_api(audio_data, sample_rate=sample_rate, model_name=model_name)
     else:
         transcription = transcribe_local(audio_data, local_model, sample_rate=sample_rate)
 
     return post_process_transcription(transcription)
-

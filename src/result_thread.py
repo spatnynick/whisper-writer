@@ -34,7 +34,7 @@ class ResultThread(QThread):
     resultSignal = pyqtSignal(str)
     failedAudioSignal = pyqtSignal(object)
 
-    def __init__(self, local_model=None, audio_data=None, sample_rate=None):
+    def __init__(self, local_model=None, audio_data=None, sample_rate=None, model_name=None):
         """
         Initialize the ResultThread.
 
@@ -49,6 +49,7 @@ class ResultThread(QThread):
         self.is_running = True
         self.is_cancelled = False
         self.sample_rate = sample_rate
+        self.model_name = model_name
         self.mutex = QMutex()
 
     def stop_recording(self):
@@ -105,7 +106,10 @@ class ResultThread(QThread):
 
             # Time the transcription process
             start_time = time.time()
-            result = transcribe(audio_data, self.local_model, sample_rate=self.sample_rate)
+            transcribe_options = {'sample_rate': self.sample_rate}
+            if self.model_name is not None:
+                transcribe_options['model_name'] = self.model_name
+            result = transcribe(audio_data, self.local_model, **transcribe_options)
             end_time = time.time()
 
             transcription_time = end_time - start_time
@@ -122,7 +126,10 @@ class ResultThread(QThread):
         except Exception:
             if audio_data is not None and self.is_running:
                 self.transcription_failed = True
-                self.failedAudioSignal.emit((audio_data, self.sample_rate))
+                failed_recording = (audio_data, self.sample_rate)
+                if self.model_name is not None:
+                    failed_recording += (self.model_name,)
+                self.failedAudioSignal.emit(failed_recording)
             traceback.print_exc()
             self.statusSignal.emit('error')
 

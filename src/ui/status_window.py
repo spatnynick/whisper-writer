@@ -3,7 +3,7 @@ import os
 import time
 from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer
 from PyQt5.QtGui import QPixmap, QIcon, QPainter, QColor
-from PyQt5.QtWidgets import QApplication, QLabel, QHBoxLayout
+from PyQt5.QtWidgets import QApplication, QLabel, QHBoxLayout, QVBoxLayout
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from ui.base_window import BaseWindow
@@ -17,7 +17,7 @@ class StatusWindow(BaseWindow):
         """
         Initialize the status window.
         """
-        super().__init__('', 200, 56, show_title_bar=False)
+        super().__init__('', 280, 72, show_title_bar=False)
         self.corner_radius = 28  # height // 2, for a full pill shape
         # Same colors as the tray icon's recording/transcribing glyphs (ww-logo-*.svg), so the
         # popup's border reads as the same status language rather than a new one.
@@ -67,12 +67,30 @@ class StatusWindow(BaseWindow):
         self.status_label.setFont(status_font)
         self.status_label.setStyleSheet(f"color: {self.text_color.name()};")
 
+        self.model_label = QLabel()
+        model_font = self.model_label.font()
+        model_font.setPointSize(7)
+        self.model_label.setFont(model_font)
+        self.model_label.setStyleSheet(f"color: {self.text_color.name()};")
+        self.model_label.setMaximumWidth(210)
+        self.model_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        text_layout = QVBoxLayout()
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(0)
+        text_layout.addWidget(self.status_label)
+        text_layout.addWidget(self.model_label)
+
         status_layout.addStretch(1)
         status_layout.addWidget(self.icon_label)
-        status_layout.addWidget(self.status_label)
+        status_layout.addLayout(text_layout)
         status_layout.addStretch(1)
 
         self.main_layout.addLayout(status_layout)
+
+    def set_model(self, model_name):
+        """Show the active model on the small line below the recording state."""
+        self.model_label.setText(f'Model: {model_name}' if model_name else '')
 
     def _tinted_pixmap(self, path, size, color):
         """

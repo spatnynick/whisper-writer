@@ -217,7 +217,12 @@ class SettingsWindow(BaseWindow):
     def add_setting_widget(self, layout, key, meta, category, sub_category=None):
         """Add a setting widget to the layout."""
         item_layout = QHBoxLayout()
-        label = QLabel(f"{key.replace('_', ' ').capitalize()}:")
+        display_names = {
+            ('model_options', 'api', 'model'): 'Primary model',
+            ('model_options', 'api', 'secondary_model'): 'Secondary model',
+        }
+        label_text = display_names.get((category, sub_category, key), key.replace('_', ' ').capitalize())
+        label = QLabel(f"{label_text}:")
         label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         widget = self.create_widget_for_type(key, meta, category, sub_category)
@@ -257,8 +262,8 @@ class SettingsWindow(BaseWindow):
         meta_type = meta.get('type')
         current_value = self.get_config_value(category, sub_category, key, meta)
 
-        if category == 'model_options' and sub_category == 'api' and key == 'model':
-            return self.create_api_model_selector(current_value)
+        if category == 'model_options' and sub_category == 'api' and key in ('model', 'secondary_model'):
+            return self.create_api_model_selector(current_value, primary=key == 'model')
         if category == 'model_options' and sub_category == 'common' and key == 'initial_prompt':
             return self.create_text_edit(current_value)
         if meta_type == 'bool':
@@ -284,8 +289,8 @@ class SettingsWindow(BaseWindow):
         widget.setCurrentText(value)
         return widget
 
-    def create_api_model_selector(self, value):
-        """Create an editable API model combo with an explicit model-list refresh button."""
+    def create_api_model_selector(self, value, primary=False):
+        """Create an editable API model combo, with refresh controls on the primary row."""
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -293,27 +298,38 @@ class SettingsWindow(BaseWindow):
         combo = QComboBox(container)
         combo.setEditable(True)
         combo.setInsertPolicy(QComboBox.NoInsert)
-        combo.setObjectName('model_options_api_model_selector')
+        combo.setObjectName(
+            'model_options_api_model_selector'
+            if primary else 'model_options_api_secondary_model_selector'
+        )
+        if not primary:
+            combo.addItem('')
+            combo.setPlaceholderText('Disabled — use primary model')
         if value:
             combo.addItem(str(value))
             combo.setCurrentText(str(value))
         layout.addWidget(combo, 1)
 
-        refresh_button = QPushButton('Refresh', container)
-        refresh_button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
-        refresh_button.setToolTip('Load models from the configured API base URL')
-        refresh_button.setObjectName('model_options_api_model_refresh')
-        layout.addWidget(refresh_button)
+        if primary:
+            refresh_button = QPushButton('Refresh', container)
+            refresh_button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+            refresh_button.setToolTip('Load models from the configured API base URL')
+            refresh_button.setObjectName('model_options_api_model_refresh')
+            layout.addWidget(refresh_button)
 
-        status = QLabel('', container)
-        status.setObjectName('model_options_api_model_status')
-        status.setMinimumWidth(80)
-        status.setToolTip('Model discovery status')
-        layout.addWidget(status)
+            status = QLabel('', container)
+            status.setObjectName('model_options_api_model_status')
+            status.setMinimumWidth(80)
+            status.setToolTip('Model discovery status')
+            layout.addWidget(status)
 
-        self.api_model_combo = combo
-        self.api_model_refresh_button = refresh_button
-        self.api_model_status = status
+            self.api_model_combo = combo
+            self.api_model_combos = [combo]
+            self.api_model_refresh_button = refresh_button
+            self.api_model_status = status
+        else:
+            self.api_model_combos = getattr(self, 'api_model_combos', [])
+            self.api_model_combos.append(combo)
         return container
 
     def create_line_edit(self, value, key=None):
@@ -522,19 +538,23 @@ class SettingsWindow(BaseWindow):
         self._set_model_discovery_status(f'{count} model' + ('' if count == 1 else 's'))
 
     def _replace_api_model_options(self, model_ids):
-        """Replace discovered choices while preserving a manually entered model if needed."""
-        combo = self.api_model_combo
-        current = combo.currentText().strip()
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItems(model_ids)
-        if current and current not in model_ids:
-            combo.insertItem(0, current)
-        if current:
-            combo.setCurrentText(current)
-        elif model_ids:
-            combo.setCurrentIndex(0)
-        combo.blockSignals(False)
+        """Replace discovered choices while preserving both last-selected values."""
+        for combo_index, combo in enumerate(getattr(self, 'api_model_combos', [])):
+            current = combo.currentText().strip()
+            combo.blockSignals(True)
+            combo.clear()
+            if combo_index > 0:
+                combo.addItem('')
+            combo.addItems(model_ids)
+            if current and current not in model_ids:
+                combo.insertItem(1 if combo_index > 0 else 0, current)
+            if current:
+                combo.setCurrentText(current)
+            elif combo_index > 0:
+                combo.setCurrentIndex(0)
+            elif model_ids:
+                combo.setCurrentIndex(0)
+            combo.blockSignals(False)
 
     def save_settings(self):
         """Save the settings to the config file and .env file. If nothing actually changed,
