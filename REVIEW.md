@@ -116,17 +116,14 @@ Run `venv/bin/python -m unittest discover -s tests -v` from the checkout. Tests 
 keyboard input, offscreen Qt and synthetic audio; one test uses the real SDK against a
 loopback HTTP server. They never record the microphone or type into another application.
 
-All 18 regression tests passed on this machine. Also checked Python compilation, shell syntax, `git diff --check`, installed dependency
-consistency, dependency audit before/after, and offscreen full application startup/shutdown
-with hardware adapters mocked. The desktop application was restarted after these checks and remained running; its
-startup log contained only the known VAD/setuptools deprecation warning. Real microphone dictation, NAS transcription, GPU inference, suspend/resume and
-operation on the other computers still need normal use validation.
-
-
-Follow-up verification: all 27 headless regression tests passed, including real HTTP failure and
-retry using identical WAV audio, retry failures and discarding failed audio on the next recording.
-Seven isolated X11 checks passed both with bare Xvfb and with KDE KWin, covering suppression,
-existing desktop grabs, the real pynput observer, popup focus, Settings activation and Escape discarding Settings edits without quitting.
+The current suite has 41 headless regression tests, including real HTTP failure/retry using
+identical WAV audio, retry failures, model-list discovery, model alternation and preservation
+of selected models. Seven isolated X11 checks also pass, covering suppression, existing desktop
+grabs, the real pynput observer, popup focus, Settings activation and Escape discarding Settings
+edits without quitting. Python compilation, shell syntax, `git diff --check`, installed
+dependency consistency, and offscreen application startup/shutdown with hardware adapters
+mocked were also checked. Real microphone dictation, NAS transcription, GPU inference,
+suspend/resume and operation on the other computers still need normal use validation.
 
 The tray-update follow-up adds shell checks for current and newer remote commits, plus GUI
 checks for the current, available, failed and worker-active update paths. The updater uses the
