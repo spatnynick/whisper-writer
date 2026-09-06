@@ -116,7 +116,7 @@ Run `venv/bin/python -m unittest discover -s tests -v` from the checkout. Tests 
 keyboard input, offscreen Qt and synthetic audio; one test uses the real SDK against a
 loopback HTTP server. They never record the microphone or type into another application.
 
-The current suite has 42 headless regression tests, including real HTTP failure/retry using
+The current suite has 45 headless regression tests, including real HTTP failure/retry using
 identical WAV audio, retry failures, model-list discovery, model alternation and preservation
 of selected models. Seven isolated X11 checks also pass, covering suppression, existing desktop
 grabs, the real pynput observer, popup focus, Settings activation and Escape discarding Settings

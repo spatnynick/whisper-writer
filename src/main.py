@@ -26,7 +26,10 @@ class WhisperWriterApp(QObject):
     activationRequested = pyqtSignal()
     deactivationRequested = pyqtSignal()
     cancelRequested = pyqtSignal()
-    MODEL_SWITCH_HOLD_MS = 600
+    # A held activation selects the other configured model.  Keep this short enough that
+    # model selection does not make the hotkey feel unresponsive, while leaving a clear
+    # distinction between a tap and a hold.
+    MODEL_SWITCH_HOLD_MS = 400
 
     def __init__(self):
         """
@@ -49,6 +52,7 @@ class WhisperWriterApp(QObject):
         self.active_model_name = None
         self._model_hold_pending = False
         self._model_hold_triggered = False
+        self._model_hold_action = None
         self._model_hold_timer = QTimer(self)
         self._model_hold_timer.setSingleShot(True)
         self._model_hold_timer.setInterval(self.MODEL_SWITCH_HOLD_MS)
@@ -165,6 +169,7 @@ class WhisperWriterApp(QObject):
 
         self.tray_icon = QSystemTrayIcon(self.tray_icon_idle, self.app)
         self.tray_icon.setToolTip('WhisperWriter — Idle')
+        self.tray_icon.activated.connect(self.on_tray_activated)
 
         tray_menu = QMenu()
 
@@ -201,6 +206,15 @@ class WhisperWriterApp(QObject):
     def open_settings(self):
         # Wait until the tray menu releases its popup grab before requesting focus.
         QTimer.singleShot(0, self.settings_window.show_and_activate)
+
+    def on_tray_activated(self, reason):
+        """Toggle Settings when the user double-clicks the tray icon."""
+        if reason != QSystemTrayIcon.DoubleClick:
+            return
+        if self.settings_window.isVisible():
+            self.settings_window.close()
+        else:
+            self.open_settings()
 
     def _show_update_message(self, title, message, icon=QMessageBox.Information):
         parent = self.settings_window if self.settings_window.isVisible() else None
@@ -369,8 +383,13 @@ class WhisperWriterApp(QObject):
             self._model_slot = 0
         return self._selected_model()
 
-    def _begin_model_hold(self):
-        """Wait briefly to distinguish a short stop press from a long model-switch press."""
+    def _begin_model_hold(self, action='stop'):
+        """Wait briefly to distinguish a tap from a long model-switch press.
+
+        ``stop`` is used for a later activation while recording: a tap stops capture.
+        ``initial`` is used for the first activation of a new recording: a tap leaves
+        capture running, while a hold starts that recording on the secondary model.
+        """
         timer = getattr(self, '_model_hold_timer', None)
         if timer is None:
             return
@@ -378,6 +397,7 @@ class WhisperWriterApp(QObject):
             return
         self._model_hold_pending = True
         self._model_hold_triggered = False
+        self._model_hold_action = action
         timer.start()
 
     def _cancel_model_hold(self):
@@ -386,6 +406,7 @@ class WhisperWriterApp(QObject):
             timer.stop()
         self._model_hold_pending = False
         self._model_hold_triggered = False
+        self._model_hold_action = None
 
     def _recording_worker_active(self, worker=None):
         """Handle the brief gap before the worker's queued recording status reaches Qt."""
@@ -529,13 +550,18 @@ class WhisperWriterApp(QObject):
             if self._recording_worker_active(self.result_thread):
                 _primary, secondary = self._configured_model_pair()
                 if secondary:
-                    self._begin_model_hold()
+                    self._begin_model_hold('stop')
                 else:
                     self._finish_short_model_press()
             return
 
         self._continue_recording = ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous'
-        self.start_result_thread(model_name=self._selected_model())
+        # Every user-started recording begins on the primary model.  The first keypress can
+        # still select the secondary model by being held past the short/long threshold.
+        self.start_result_thread(reset_selection=True)
+        _primary, secondary = self._configured_model_pair()
+        if secondary and getattr(self, 'result_thread', None) is not None and not self._shutdown_action:
+            self._begin_model_hold('initial')
 
     def on_deactivation(self):
         """
@@ -543,7 +569,15 @@ class WhisperWriterApp(QObject):
         """
         if getattr(self, '_model_hold_pending', False):
             was_long_press = self._model_hold_triggered
+            action = self._model_hold_action
             self._cancel_model_hold()
+            if action == 'initial':
+                # A tap on the first activation starts a normal press-to-toggle/continuous
+                # recording.  In hold-to-record mode the key release always ends capture.
+                if ConfigManager.get_config_value('recording_options', 'recording_mode') == 'hold_to_record':
+                    if self.result_thread and self.result_thread.isRunning():
+                        self.result_thread.stop_recording()
+                return
             if not was_long_press:
                 self._finish_short_model_press()
             return
@@ -551,7 +585,7 @@ class WhisperWriterApp(QObject):
             if self.result_thread and self.result_thread.isRunning():
                 self.result_thread.stop_recording()
 
-    def start_result_thread(self, model_name=None):
+    def start_result_thread(self, model_name=None, reset_selection=True):
         """
         Start the result thread to record audio and transcribe it.
         """
@@ -560,6 +594,8 @@ class WhisperWriterApp(QObject):
 
         # Starting a new recording explicitly abandons the previous failed audio.
         self.failed_recordings.clear()
+        if reset_selection:
+            self._model_slot = 0
         if model_name is None:
             model_name = self._selected_model()
         self._set_active_model(model_name)
@@ -627,7 +663,10 @@ class WhisperWriterApp(QObject):
         if self._shutdown_action:
             self._finish_shutdown()
         elif self._continue_recording:
-            self.start_result_thread(model_name=getattr(self, 'active_model_name', None))
+            self.start_result_thread(
+                model_name=getattr(self, 'active_model_name', None),
+                reset_selection=False,
+            )
         else:
             self.on_status_changed('idle')
             self.update_tray_icon('idle')

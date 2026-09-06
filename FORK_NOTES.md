@@ -27,17 +27,19 @@ is waiting for retry, so audio work is not interrupted or silently lost.
 The launcher preserves `OPENAI_API_KEY`; `.env` supplies it when absent from the environment.
 A custom endpoint without a key receives a placeholder. `model_options.api.timeout_seconds`
 defaults to 120 seconds of HTTP inactivity; increase it in Settings for a slower server.
-Settings places the API base URL before an editable model dropdown. Changing the URL or
-pressing **Refresh** loads model IDs from the endpoint's OpenAI-compatible `/models` route
-without blocking the window; if discovery is unavailable, the model can still be typed
-manually. The API settings include separate primary and optional secondary model selectors;
-the last selected value is preserved through refreshes and when Settings is reopened. With
-both configured, a short activation press stops recording and a held activation press
-(600 ms) alternates the model without stopping capture. Release a short press to transcribe
-with the selected model. The active model appears in the tray tooltip and the status popup
-while recording/transcribing.
-The common initial prompt is a separated multi-line editor with a clickable link to OpenAI's
-prompting guide.
+Settings places the API base URL and separate primary/optional-secondary selectors in an
+API model selection box. Changing the URL or pressing **Refresh models** loads model IDs from
+the endpoint's OpenAI-compatible `/models` route without blocking the window; if discovery is
+unavailable, a model can still be typed manually. Selected values are preserved through
+refreshes and when Settings is reopened. Each new recording starts on the primary model. A
+held first activation press (400 ms) selects the secondary model while keeping capture alive;
+later short activation presses stop recording and held presses alternate the model without
+stopping capture. Release a short press to transcribe with the selected model. The active
+model appears in the tray tooltip and the status popup while recording/transcribing.
+The common initial prompt is a wide multi-line editor with the clickable OpenAI speech-to-text
+guide below it. An empty prompt uses the tracked natural technical-dictation default, adapted
+from the programming vocabulary example in `faster-whisper-dictation`, so new checkouts and
+older configurations receive the same programming/customer vocabulary bias.
 Requests are not retried automatically. Exit/settings restart waits for active worker work
 without blocking Qt; a native model call still has to finish. Complete dictation before an
 external process restart/update, which terminates in-flight work.
@@ -196,7 +198,7 @@ model_options:
     model: deepdml/faster-whisper-large-v3-turbo-ct2
     secondary_model: null
   common:
-    initial_prompt: null
+    initial_prompt: null  # uses the built-in technical-dictation prompt when empty
     language: null
     temperature: 0.0
   local:
@@ -492,9 +494,8 @@ This doesn't fully solve the general case (an unrelated real word that happens t
 one edit of some glossary term and isn't a trigger could still misfire) — mitigated by
 gating on triggers in the first place and keeping the threshold at 0.90, not lower.
 
-Config path if you want per-machine override: `model_options.common.initial_prompt` in
-`config.yaml` still exists and takes precedence over the glossary-built prompt if set
-non-null (`transcription.py`: `... or glossary.build_initial_prompt()`).
+Config path if you want a per-machine override: `model_options.common.initial_prompt` in
+`config.yaml` still exists and takes precedence over the built-in default when non-empty.
 
 Requires `rapidfuzz` (prebuilt wheel, no apt dep — added to `requirements.txt`).
 

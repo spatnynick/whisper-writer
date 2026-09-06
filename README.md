@@ -23,7 +23,7 @@ Once started, the script runs in the background and waits for a keyboard shortcu
 
 You can change the keyboard shortcut (`activation_key`) and recording mode in the [Configuration Options](#configuration-options). While recording and transcribing, a small status window is displayed that shows the current stage of the process (but this can be turned off). Once the transcription is complete, the transcribed text will be automatically written to the active window.
 
-The transcription can either be done locally through the [faster-whisper Python package](https://github.com/SYSTRAN/faster-whisper/) or through a request to [OpenAI's API](https://platform.openai.com/docs/guides/speech-to-text). By default, the app will use a local model, but you can change this in the [Configuration Options](#configuration-options). If you choose to use the API, you will need to either provide your OpenAI API key or change the base URL endpoint.
+The transcription can either be done locally through the [faster-whisper Python package](https://github.com/SYSTRAN/faster-whisper/) or through a request to [OpenAI's API](https://developers.openai.com/api/docs/guides/speech-to-text). By default, the app will use a local model, but you can change this in the [Configuration Options](#configuration-options). If you choose to use the API, you will need to either provide your OpenAI API key or change the base URL endpoint.
 
 **Fun fact:** Almost the entirety of the initial release of the project was pair-programmed with [ChatGPT-4](https://openai.com/product/gpt-4) and [GitHub Copilot](https://github.com/features/copilot) using VS Code. Practically every line, including most of this README, was written by AI. After the initial prototype was finished, WhisperWriter was used to write a lot of the prompts as well!
 
@@ -121,12 +121,12 @@ WhisperWriter uses a configuration file to customize its behaviour. To set up th
 - `common`: Options common to both API and local models.
   - `language`: The language code for the transcription in [ISO-639-1 format](https://en.wikipedia.org/wiki/List_of_ISO_639_language_codes). (Default: `null`)
   - `temperature`: Controls the randomness of the transcription output. Lower values make the output more focused and deterministic. (Default: `0.0`)
-  - `initial_prompt`: Optional multi-line context used to condition the transcription. More info: [OpenAI Prompting Guide](https://platform.openai.com/docs/guides/speech-to-text/prompting). (Default: `null`)
+  - `initial_prompt`: Optional multi-line context used to condition the transcription. An empty setting uses a built-in natural technical-dictation prompt suited to customer communication and software projects. The wording is adapted from the [faster-whisper-dictation programming vocabulary example](https://github.com/bhargavchippada/faster-whisper-dictation#dictating-code-programming-vocabulary). More info: [OpenAI speech-to-text guide](https://developers.openai.com/api/docs/guides/speech-to-text).
 
-- `api`: Configuration options for the OpenAI API. See the [OpenAI API documentation](https://platform.openai.com/docs/api-reference/audio/create?lang=python) for more information.
+- `api`: Configuration options for the OpenAI API. See the [OpenAI transcription API reference](https://developers.openai.com/api/reference/python/resources/audio/subresources/transcriptions/methods/create) for more information.
   - `base_url`: The base URL for an OpenAI-compatible API. The Settings window can load models from its `/models` endpoint. (Default: `https://api.openai.com/v1`)
-  - `model`: The primary transcription model. The Settings window provides an editable dropdown and Refresh button when the endpoint exposes available models; the last selected value remains selected after refresh and when Settings is reopened. (Default: `whisper-1`)
-  - `secondary_model`: Optional secondary model. While recording, hold the activation shortcut to alternate primary and secondary without stopping capture; release a short press to stop and transcribe with the selected model. The active model is shown in the tray tooltip and status popup. (Default: `null`)
+  - `model`: The primary transcription model. The Settings window provides an editable dropdown and Refresh button when the endpoint exposes available models; the last selected value remains selected after refresh and when Settings is reopened. Every new recording starts with this model; hold the first activation for 400 ms to select the secondary model. (Default: `whisper-1`)
+  - `secondary_model`: Optional secondary model. After the first press, a short activation stops and transcribes; a held activation alternates primary and secondary without stopping capture. The active model is shown in the tray tooltip and status popup. (Default: `null`)
   - `api_key`: Your API key for the OpenAI API. Required for non-local API usage. (Default: `null`)
 
 - `local`: Configuration options for the local Whisper model.

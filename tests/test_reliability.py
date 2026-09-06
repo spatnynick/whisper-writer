@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 import numpy as np
 from PyQt5.QtCore import QObject, QThread, Qt, QTimer
-from PyQt5.QtWidgets import QApplication, QComboBox, QLabel, QLineEdit, QTextEdit, QWidget
+from PyQt5.QtWidgets import QApplication, QComboBox, QLabel, QLineEdit, QPushButton, QTextEdit, QWidget, QGroupBox, QSystemTrayIcon
 from utils import ConfigManager
 from result_thread import ResultThread
 from main import WhisperWriterApp
@@ -48,6 +48,7 @@ class ReliabilityTests(unittest.TestCase):
         app.active_model_name = None
         app._model_hold_pending = False
         app._model_hold_triggered = False
+        app._model_hold_action = None
         app._model_hold_timer = QTimer()
         app._model_hold_timer.setSingleShot(True)
         app._model_hold_timer.setInterval(app.MODEL_SWITCH_HOLD_MS)
@@ -271,6 +272,10 @@ class ReliabilityTests(unittest.TestCase):
             secondary_combo = settings.findChild(QComboBox, 'model_options_api_secondary_model_selector')
             prompt = settings.findChild(QTextEdit, 'model_options_common_initial_prompt_input')
             prompt_link = settings.findChild(QLabel, 'model_options_common_initial_prompt_link')
+            model_group = settings.findChild(QGroupBox, 'model_options_api_models_group')
+            refresh_button = settings.findChild(QPushButton, 'model_options_api_model_refresh')
+            timeout = settings.findChild(QLineEdit, 'model_options_api_timeout_seconds_input')
+            api_key = settings.findChild(QLineEdit, 'model_options_api_api_key_input')
             self.assertIsNotNone(base_url)
             self.assertIsNotNone(model_container)
             self.assertIsNotNone(model_combo)
@@ -278,13 +283,20 @@ class ReliabilityTests(unittest.TestCase):
             self.assertIsNotNone(secondary_combo)
             self.assertIsNotNone(prompt)
             self.assertIsNotNone(prompt_link)
+            self.assertIsNotNone(model_group)
+            self.assertIsNotNone(refresh_button)
+            self.assertIsNotNone(timeout)
+            self.assertIsNotNone(api_key)
             self.assertTrue(model_combo.isEditable())
             self.assertTrue(secondary_combo.isEditable())
             self.assertEqual(settings.get_widget_value_typed(model_container, 'str'), 'whisper-1')
             self.assertIsNone(settings.get_widget_value_typed(secondary_container, 'str'))
-            self.assertIsNone(settings.get_widget_value_typed(prompt, 'str'))
+            self.assertIn('customer projects', settings.get_widget_value_typed(prompt, 'str'))
             self.assertTrue(prompt_link.openExternalLinks())
+            self.assertIn('https://developers.openai.com/api/docs/guides/speech-to-text', prompt_link.text())
             self.assertGreater(prompt.geometry().top(), settings.height() // 3)
+            self.assertGreater(prompt.width(), 450)
+            self.assertGreater(prompt_link.geometry().top(), prompt.geometry().bottom())
             api_order = list(ConfigManager.get_schema()['model_options']['api'])
             self.assertLess(api_order.index('base_url'), api_order.index('model'))
             self.assertLess(api_order.index('model'), api_order.index('secondary_model'))
@@ -308,6 +320,12 @@ class ReliabilityTests(unittest.TestCase):
             ['local-one', 'local-two'],
         )
         self.assertEqual(SettingsWindow._models_url('http://localhost:1234/v1/').toString(), 'http://localhost:1234/v1/models')
+
+    def test_empty_initial_prompt_uses_schema_default(self):
+        ConfigManager.set_config_value(None, 'model_options', 'common', 'initial_prompt')
+        self.assertIn('customer projects', transcription._initial_prompt())
+        ConfigManager.set_config_value('my custom vocabulary', 'model_options', 'common', 'initial_prompt')
+        self.assertEqual(transcription._initial_prompt(), 'my custom vocabulary')
 
     def test_settings_refreshes_models_from_configured_endpoint(self):
         calls = []
@@ -455,6 +473,50 @@ class ReliabilityTests(unittest.TestCase):
             app.on_activation()
             third_worker = start.call_args.args[0]
         self.assertEqual(third_worker.model_name, 'primary-model')
+
+    def test_first_long_press_selects_secondary_and_next_recording_resets_primary(self):
+        app = self.app()
+        self.assertEqual(app.MODEL_SWITCH_HOLD_MS, 400)
+        ConfigManager.set_config_value(True, 'model_options', 'use_api')
+        ConfigManager.set_config_value('primary-model', 'model_options', 'api', 'model')
+        ConfigManager.set_config_value('secondary-model', 'model_options', 'api', 'secondary_model')
+        app.status_window = Mock()
+
+        first_worker = Mock(model_name='primary-model')
+        first_worker.isRunning.return_value = True
+        second_worker = Mock(model_name='primary-model')
+        second_worker.isRunning.return_value = True
+
+        with patch('main.ResultThread', side_effect=[first_worker, second_worker]):
+            app.current_status = 'recording'
+            app.on_activation()
+            self.assertEqual(first_worker.model_name, 'primary-model')
+            self.assertEqual(app._model_hold_action, 'initial')
+            self.assertTrue(app._model_hold_pending)
+
+            app._on_model_hold()
+            self.assertEqual(app.active_model_name, 'secondary-model')
+            app.on_deactivation()
+            first_worker.stop_recording.assert_not_called()
+
+            app.result_thread = None
+            app.current_status = 'idle'
+            app.on_activation()
+            self.assertEqual(second_worker.model_name, 'primary-model')
+            self.assertEqual(app.active_model_name, 'primary-model')
+            self.assertEqual(app._model_slot, 0)
+
+    def test_tray_double_click_toggles_settings(self):
+        app = self.app()
+        app.settings_window.isVisible.return_value = True
+        app.on_tray_activated(QSystemTrayIcon.DoubleClick)
+        app.settings_window.close.assert_called_once()
+
+        app.settings_window.reset_mock()
+        app.settings_window.isVisible.return_value = False
+        with patch.object(app, 'open_settings') as open_settings:
+            app.on_tray_activated(QSystemTrayIcon.DoubleClick)
+        open_settings.assert_called_once()
 
     def test_single_model_keeps_immediate_stop_behavior(self):
         app = self.app()

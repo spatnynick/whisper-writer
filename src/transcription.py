@@ -13,6 +13,21 @@ import glossary
 
 logger = logging.getLogger(__name__)
 
+
+def _initial_prompt():
+    """Return the configured prompt, or the schema default for older empty configs."""
+    model_options = ConfigManager.get_config_section('model_options')
+    common_options = model_options.get('common', {}) if isinstance(model_options, dict) else {}
+    configured = common_options.get('initial_prompt') if isinstance(common_options, dict) else None
+    if configured:
+        return configured
+
+    try:
+        default = ConfigManager.get_schema()['model_options']['common']['initial_prompt']['value']
+    except (KeyError, TypeError):
+        default = None
+    return default or glossary.build_initial_prompt()
+
 def create_local_model():
     """
     Create a local model using the faster-whisper library.
@@ -65,7 +80,7 @@ def transcribe_local(audio_data, local_model=None, sample_rate=None):
 
     response = local_model.transcribe(audio=audio_data_float,
                                       language=model_options['common']['language'],
-                                      initial_prompt=model_options['common']['initial_prompt'] or glossary.build_initial_prompt(),
+                                      initial_prompt=_initial_prompt(),
                                       condition_on_previous_text=model_options['local']['condition_on_previous_text'],
                                       temperature=model_options['common']['temperature'],
                                       vad_filter=model_options['local']['vad_filter'],)
@@ -95,7 +110,7 @@ def transcribe_api(audio_data, sample_rate=None, model_name=None):
             model=model_name or model_options['api']['model'],
             file=('audio.wav', byte_io, 'audio/wav'),
             language=model_options['common']['language'],
-            prompt=model_options['common']['initial_prompt'] or glossary.build_initial_prompt(),
+            prompt=_initial_prompt(),
             temperature=model_options['common']['temperature'],
         )
     logger.debug(f"transcribe_api: HTTP call took {time.time() - start:.3f}s")

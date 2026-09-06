@@ -6,7 +6,7 @@ from dotenv import set_key, load_dotenv
 from PyQt5.QtWidgets import (
     QApplication, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox,
     QMessageBox, QShortcut, QTabWidget, QWidget, QSizePolicy, QSpacerItem, QToolButton, QStyle,
-    QFileDialog, QTextEdit
+    QFileDialog, QTextEdit, QGroupBox
 )
 from PyQt5.QtCore import Qt, QCoreApplication, QProcess, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QIcon, QKeySequence
@@ -18,6 +18,8 @@ from utils import ConfigManager
 
 load_dotenv()
 
+PROMPTING_GUIDE_URL = 'https://developers.openai.com/api/docs/guides/speech-to-text'
+
 class SettingsWindow(BaseWindow):
     settings_closed = pyqtSignal()
     settings_saved = pyqtSignal()
@@ -27,7 +29,7 @@ class SettingsWindow(BaseWindow):
 
     def __init__(self):
         """Initialize the settings window."""
-        super().__init__('Settings', 700, 700, frameless=False)
+        super().__init__('Settings', 760, 700, frameless=False)
         self.setWindowIcon(QIcon(os.path.join('assets', 'ww-logo.png')))
         self.schema = ConfigManager.get_schema()
         # Set to True by main.py once the app's other components exist — on a first run
@@ -180,6 +182,11 @@ class SettingsWindow(BaseWindow):
         for sub_category, sub_settings in settings.items():
             if isinstance(sub_settings, dict) and 'value' in sub_settings:
                 self.add_setting_widget(layout, sub_category, sub_settings, category)
+            elif category == 'model_options' and sub_category == 'api':
+                self.create_api_model_group(layout, sub_settings)
+                for key in ('timeout_seconds', 'api_key'):
+                    if key in sub_settings:
+                        self.add_setting_widget(layout, key, sub_settings[key], category, sub_category)
             else:
                 for key, meta in sub_settings.items():
                     if category == 'model_options' and sub_category == 'common' and key == 'initial_prompt':
@@ -197,6 +204,54 @@ class SettingsWindow(BaseWindow):
             prompt_heading.setFont(prompt_font)
             layout.addWidget(prompt_heading)
             self.add_setting_widget(layout, key, meta, category, sub_category)
+
+    def create_api_model_group(self, layout, settings):
+        """Group the endpoint and model selectors into one compact model box."""
+        group = QGroupBox('API model selection')
+        group.setObjectName('model_options_api_models_group')
+        group_layout = QVBoxLayout(group)
+        group_layout.setContentsMargins(10, 10, 10, 10)
+        group_layout.setSpacing(6)
+
+        # The schema order keeps the endpoint above the primary and secondary selectors.
+        self.api_model_combos = []
+        for key, meta in settings.items():
+            if key in ('base_url', 'model', 'secondary_model'):
+                self.add_setting_widget(group_layout, key, meta, 'model_options', 'api')
+
+        group_layout.addWidget(self.create_api_model_refresh_controls())
+        layout.addWidget(group)
+        self.api_model_group = group
+
+    def create_api_model_refresh_controls(self):
+        """Create model discovery controls beneath both model selectors."""
+        row = QWidget()
+        row.setObjectName('model_options_api_model_refresh_row')
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 2, 0, 0)
+        row_layout.addStretch(1)
+
+        refresh_button = QPushButton('Refresh models', row)
+        refresh_button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        refresh_button.setToolTip('Load models from the configured API base URL')
+        refresh_button.setObjectName('model_options_api_model_refresh')
+        row_layout.addWidget(refresh_button)
+
+        status = QLabel('', row)
+        status.setObjectName('model_options_api_model_status')
+        status.setMinimumWidth(90)
+        status.setToolTip('Model discovery status')
+        row_layout.addWidget(status)
+
+        help_button = self.create_help_button(
+            'Query the configured API base URL for available model IDs. The number of models found is shown here.'
+        )
+        help_button.setObjectName('model_options_api_model_refresh_help')
+        row_layout.addWidget(help_button)
+
+        self.api_model_refresh_button = refresh_button
+        self.api_model_status = status
+        return row
 
     def create_buttons(self):
         """Create reset and save buttons, side by side on one line."""
@@ -230,16 +285,28 @@ class SettingsWindow(BaseWindow):
             return
 
         help_button = self.create_help_button(meta.get('description', ''))
+        is_prompt = category == 'model_options' and sub_category == 'common' and key == 'initial_prompt'
 
         item_layout.addWidget(label)
         if isinstance(widget, QWidget):
-            item_layout.addWidget(widget)
+            if is_prompt:
+                label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+                widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                widget.setMinimumWidth(500)
+                item_layout.addWidget(widget, 1)
+            else:
+                item_layout.addWidget(widget)
         else:
             item_layout.addLayout(widget)
-        if category == 'model_options' and sub_category == 'common' and key == 'initial_prompt':
-            item_layout.addWidget(self.create_prompt_link())
         item_layout.addWidget(help_button)
         layout.addLayout(item_layout)
+
+        if is_prompt:
+            # Keep the guide link below the editor so the prompt can use the full row width.
+            prompt_link_row = QHBoxLayout()
+            prompt_link_row.addWidget(self.create_prompt_link())
+            prompt_link_row.addStretch(1)
+            layout.addLayout(prompt_link_row)
 
         # Set object names for the widget, label, and help button
         widget_name = f"{category}_{sub_category}_{key}_input" if sub_category else f"{category}_{key}_input"
@@ -290,7 +357,7 @@ class SettingsWindow(BaseWindow):
         return widget
 
     def create_api_model_selector(self, value, primary=False):
-        """Create an editable API model combo, with refresh controls on the primary row."""
+        """Create an editable API model combo."""
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -310,26 +377,10 @@ class SettingsWindow(BaseWindow):
             combo.setCurrentText(str(value))
         layout.addWidget(combo, 1)
 
+        self.api_model_combos = getattr(self, 'api_model_combos', [])
+        self.api_model_combos.append(combo)
         if primary:
-            refresh_button = QPushButton('Refresh', container)
-            refresh_button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
-            refresh_button.setToolTip('Load models from the configured API base URL')
-            refresh_button.setObjectName('model_options_api_model_refresh')
-            layout.addWidget(refresh_button)
-
-            status = QLabel('', container)
-            status.setObjectName('model_options_api_model_status')
-            status.setMinimumWidth(80)
-            status.setToolTip('Model discovery status')
-            layout.addWidget(status)
-
             self.api_model_combo = combo
-            self.api_model_combos = [combo]
-            self.api_model_refresh_button = refresh_button
-            self.api_model_status = status
-        else:
-            self.api_model_combos = getattr(self, 'api_model_combos', [])
-            self.api_model_combos.append(combo)
         return container
 
     def create_line_edit(self, value, key=None):
@@ -371,10 +422,10 @@ class SettingsWindow(BaseWindow):
         return help_button
 
     def create_prompt_link(self):
-        """Add a visible link to OpenAI's prompting guidance beside the prompt editor."""
+        """Add a visible link to OpenAI's prompting guidance below the prompt editor."""
         link = QLabel(
-            '<a href="https://platform.openai.com/docs/guides/speech-to-text/prompting">'
-            'Prompting guide</a>'
+            f'<a href="{PROMPTING_GUIDE_URL}">'
+            'OpenAI speech-to-text prompting guide</a>'
         )
         link.setOpenExternalLinks(True)
         link.setTextInteractionFlags(Qt.TextBrowserInteraction)
@@ -401,6 +452,8 @@ class SettingsWindow(BaseWindow):
     def on_api_mode_changed(self, use_api):
         """Toggle API/local options and refresh API models when API mode is enabled."""
         self.toggle_api_local_options(use_api)
+        if getattr(self, 'api_model_group', None):
+            self.api_model_group.setVisible(bool(use_api))
         if use_api:
             self._schedule_model_refresh()
         else:

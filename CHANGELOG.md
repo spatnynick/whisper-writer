@@ -11,12 +11,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - New continuous recording mode ([Issue #40](https://github.com/savbell/whisper-writer/issues/40)).
 - New option to play a sound when transcription finishes ([Issue #40](https://github.com/savbell/whisper-writer/issues/40)).
 - Optional secondary API model selection; a held activation shortcut alternates between primary and secondary models without ending capture.
+- First-key long press selects the secondary model for a new recording; new recordings reset to the primary model and use a 400 ms hold threshold.
+- Tray double-click toggles Settings, and the API model selectors plus refresh controls are grouped in a dedicated box.
 
 ### Changed
 - Migrated status window from using `tkinter` to `PyQt5`.
 - Migrated from using JSON to using YAML to store configuration settings.
 - Upgraded to latest versions of `openai` and `faster-whisper`, including support for local API ([Issue #32](https://github.com/savbell/whisper-writer/issues/32)).
 - API model selectors preserve the last selected values after model-list refresh and when Settings is reopened; the active model is shown during recording and transcription.
+- The initial prompt has a built-in technical-dictation default for empty configurations, with a wide editor and the current OpenAI speech-to-text guide below it.
 
 ### Removed
 - No longer using `keyboard` package to listen for key presses.
