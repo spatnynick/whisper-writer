@@ -143,6 +143,23 @@ class X11Checks(unittest.TestCase):
         finally:
             popup.close()
 
+    def test_cancelled_status_offers_clickable_retry(self):
+        popup = StatusWindow()
+        requested = []
+        popup.retryRequested.connect(lambda: requested.append(True))
+        try:
+            popup.show_retry()
+            pump()
+            self.assertTrue(popup.isVisible())
+            self.assertTrue(popup.retry_button.isVisible())
+            QTest.mouseClick(popup.retry_button, Qt.LeftButton)
+            pump()
+            self.assertEqual(requested, [True])
+            popup.updateStatus('recording')
+            self.assertFalse(popup.retry_button.isVisible())
+        finally:
+            popup.close()
+
     def test_settings_restores_and_requests_focus(self):
         settings = SettingsWindow()
         try:

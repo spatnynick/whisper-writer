@@ -57,6 +57,10 @@ class WhisperWriterApp(QObject):
         self._model_hold_timer.setSingleShot(True)
         self._model_hold_timer.setInterval(self.MODEL_SWITCH_HOLD_MS)
         self._model_hold_timer.timeout.connect(self._on_model_hold)
+        # Some Linux tray backends do not emit DoubleClick.  They emit two Trigger
+        # activations instead, so keep a short click state machine for both forms.
+        self._tray_click_pending = False
+        self._tray_ignore_double_click = False
         self.activationRequested.connect(self.on_activation, Qt.QueuedConnection)
         self.deactivationRequested.connect(self.on_deactivation, Qt.QueuedConnection)
         self.cancelRequested.connect(self.on_cancel_key, Qt.QueuedConnection)
@@ -148,6 +152,7 @@ class WhisperWriterApp(QObject):
         if not ConfigManager.get_config_value('misc', 'hide_status_window'):
             self.status_window = StatusWindow()
             self.status_window.closeSignal.connect(self.stop_result_thread)
+            self.status_window.retryRequested.connect(self.retry_transcription)
 
         self.create_tray_icon()
         self.key_listener.start()
@@ -170,6 +175,14 @@ class WhisperWriterApp(QObject):
         self.tray_icon = QSystemTrayIcon(self.tray_icon_idle, self.app)
         self.tray_icon.setToolTip('WhisperWriter — Idle')
         self.tray_icon.activated.connect(self.on_tray_activated)
+        self._tray_click_timer = QTimer(self)
+        self._tray_click_timer.setSingleShot(True)
+        self._tray_click_timer.setInterval(450)
+        self._tray_click_timer.timeout.connect(self._clear_tray_click)
+        self._tray_ignore_timer = QTimer(self)
+        self._tray_ignore_timer.setSingleShot(True)
+        self._tray_ignore_timer.setInterval(450)
+        self._tray_ignore_timer.timeout.connect(self._clear_tray_double_click_guard)
 
         tray_menu = QMenu()
 
@@ -207,14 +220,54 @@ class WhisperWriterApp(QObject):
         # Wait until the tray menu releases its popup grab before requesting focus.
         QTimer.singleShot(0, self.settings_window.show_and_activate)
 
-    def on_tray_activated(self, reason):
-        """Toggle Settings when the user double-clicks the tray icon."""
-        if reason != QSystemTrayIcon.DoubleClick:
-            return
+    def _clear_tray_click(self):
+        self._tray_click_pending = False
+
+    def _clear_tray_double_click_guard(self):
+        self._tray_ignore_double_click = False
+
+    def _toggle_settings_from_tray(self):
         if self.settings_window.isVisible():
             self.settings_window.close()
         else:
             self.open_settings()
+
+    def on_tray_activated(self, reason):
+        """Toggle Settings for a double-click across Qt tray backends."""
+        if reason == QSystemTrayIcon.Context:
+            return
+        if reason == QSystemTrayIcon.DoubleClick:
+            # KDE/status-notifier implementations can send two Trigger signals followed
+            # by DoubleClick.  The second Trigger already toggled the window.
+            if getattr(self, '_tray_ignore_double_click', False):
+                self._tray_ignore_double_click = False
+                timer = getattr(self, '_tray_ignore_timer', None)
+                if timer:
+                    timer.stop()
+                return
+            self._tray_click_pending = False
+            timer = getattr(self, '_tray_click_timer', None)
+            if timer:
+                timer.stop()
+            self._toggle_settings_from_tray()
+            return
+        if reason != QSystemTrayIcon.Trigger:
+            return
+        if getattr(self, '_tray_click_pending', False):
+            self._tray_click_pending = False
+            timer = getattr(self, '_tray_click_timer', None)
+            if timer:
+                timer.stop()
+            self._tray_ignore_double_click = True
+            ignore_timer = getattr(self, '_tray_ignore_timer', None)
+            if ignore_timer:
+                ignore_timer.start()
+            self._toggle_settings_from_tray()
+            return
+        self._tray_click_pending = True
+        timer = getattr(self, '_tray_click_timer', None)
+        if timer:
+            timer.start()
 
     def _show_update_message(self, title, message, icon=QMessageBox.Information):
         parent = self.settings_window if self.settings_window.isVisible() else None
@@ -653,6 +706,25 @@ class WhisperWriterApp(QObject):
     def on_worker_finished(self):
         self._cancel_model_hold()
         thread = self.result_thread
+        # A queued failedAudioSignal normally arrives before finished, but make the
+        # retention guarantee independent of Qt's cross-thread delivery order.
+        retained_recording = getattr(thread, 'retained_recording', None) if thread else None
+        if (
+            thread
+            and not self._retrying
+            and getattr(thread, 'is_cancelled', False) is True
+            and not self.failed_recordings
+            and isinstance(retained_recording, tuple)
+            and len(retained_recording) >= 2
+        ):
+            self.failed_recordings[:] = [retained_recording]
+            self._update_retry_actions()
+        cancelled_with_audio = bool(
+            thread
+            and not self._retrying
+            and getattr(thread, 'is_cancelled', False) is True
+            and self.failed_recordings
+        )
         if self._retrying and thread and thread.transcription_succeeded:
             self.failed_recordings.pop(0)
         self._retrying = False
@@ -672,6 +744,15 @@ class WhisperWriterApp(QObject):
             self.update_tray_icon('idle')
             if getattr(self, 'status_window', None):
                 self.status_window.updateStatus('idle')
+                if cancelled_with_audio:
+                    self.status_window.show_retry()
+            if cancelled_with_audio:
+                self.tray_icon.showMessage(
+                    'WhisperWriter',
+                    'Recording cancelled. Audio is retained; click Retry in the popup or tray menu.',
+                    QSystemTrayIcon.Warning,
+                    5000,
+                )
 
     def on_cancel_key(self):
         """
@@ -682,6 +763,9 @@ class WhisperWriterApp(QObject):
             self.settings_window.discard_and_close()
             return
         if self.result_thread and self.result_thread.isRunning() and self.current_status == 'recording':
+            # A cancelled continuous recording must not immediately start a new segment;
+            # the retained audio is offered through the retry controls instead.
+            self._continue_recording = False
             self.result_thread.cancel_recording()
 
     def on_transcription_complete(self, result):

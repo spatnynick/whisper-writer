@@ -48,6 +48,7 @@ class ResultThread(QThread):
         self.is_recording = audio_data is None
         self.is_running = True
         self.is_cancelled = False
+        self.retained_recording = None
         self.sample_rate = sample_rate
         self.model_name = model_name
         self.mutex = QMutex()
@@ -59,11 +60,20 @@ class ResultThread(QThread):
         self.mutex.unlock()
 
     def cancel_recording(self):
-        """Cancel the current recording: stop capturing and discard whatever was recorded."""
+        """Cancel capture while keeping any audio already collected available for retry."""
         self.mutex.lock()
         self.is_cancelled = True
         self.is_recording = False
         self.mutex.unlock()
+
+    def _retained_recording(self, audio_data):
+        """Build the in-memory retry entry for captured audio."""
+        if audio_data is None:
+            return None
+        recording = (audio_data, self.sample_rate)
+        if self.model_name is not None:
+            recording += (self.model_name,)
+        return recording
 
     def stop(self):
         """Stop the entire thread execution."""
@@ -94,6 +104,10 @@ class ResultThread(QThread):
                 return
 
             if self.is_cancelled:
+                retained_recording = self._retained_recording(audio_data)
+                self.retained_recording = retained_recording
+                if retained_recording is not None:
+                    self.failedAudioSignal.emit(retained_recording)
                 ConfigManager.console_print('Recording cancelled.')
                 logger.debug('Recording cancelled.')
                 self.statusSignal.emit('cancel')
@@ -129,10 +143,8 @@ class ResultThread(QThread):
         except Exception:
             if audio_data is not None and self.is_running:
                 self.transcription_failed = True
-                failed_recording = (audio_data, self.sample_rate)
-                if self.model_name is not None:
-                    failed_recording += (self.model_name,)
-                self.failedAudioSignal.emit(failed_recording)
+                self.retained_recording = self._retained_recording(audio_data)
+                self.failedAudioSignal.emit(self.retained_recording)
             traceback.print_exc()
             self.statusSignal.emit('error')
 

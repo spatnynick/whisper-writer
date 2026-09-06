@@ -163,6 +163,19 @@ class ReliabilityTests(unittest.TestCase):
             worker.run()
             transcribe.assert_not_called()
 
+    def test_cancel_retains_audio_for_retry(self):
+        data = np.ones(1600, dtype=np.int16)
+        worker = ResultThread(sample_rate=8000, model_name='secondary-model')
+        worker.cancel_recording()
+        retained = []
+        worker.failedAudioSignal.connect(retained.append)
+        with patch.object(worker, '_record_audio', return_value=data), patch('result_thread.transcribe') as transcribe:
+            worker.run()
+        transcribe.assert_not_called()
+        self.assertEqual(len(retained), 1)
+        self.assertIs(retained[0][0], data)
+        self.assertEqual(retained[0][1:], (8000, 'secondary-model'))
+
     def test_missing_audio_callback_can_be_stopped(self):
         worker = ResultThread()
         audio = Mock()
@@ -323,7 +336,14 @@ class ReliabilityTests(unittest.TestCase):
 
     def test_empty_initial_prompt_uses_schema_default(self):
         ConfigManager.set_config_value(None, 'model_options', 'common', 'initial_prompt')
-        self.assertIn('customer projects', transcription._initial_prompt())
+        default_prompt = transcription._initial_prompt()
+        self.assertIn('customer projects', default_prompt)
+        self.assertIn('SAP consulting', default_prompt)
+        self.assertIn('ABAP programming', default_prompt)
+        self.assertIn('Linux administration', default_prompt)
+        self.assertNotIn('Python function', default_prompt)
+        self.assertNotIn('JavaScript handler', default_prompt)
+        self.assertNotIn('JSON over HTTPS', default_prompt)
         ConfigManager.set_config_value('my custom vocabulary', 'model_options', 'common', 'initial_prompt')
         self.assertEqual(transcription._initial_prompt(), 'my custom vocabulary')
 
@@ -517,6 +537,39 @@ class ReliabilityTests(unittest.TestCase):
         with patch.object(app, 'open_settings') as open_settings:
             app.on_tray_activated(QSystemTrayIcon.DoubleClick)
         open_settings.assert_called_once()
+
+    def test_tray_trigger_pair_toggles_settings(self):
+        app = self.app()
+        app.settings_window.isVisible.return_value = True
+        app.on_tray_activated(QSystemTrayIcon.Trigger)
+        app.on_tray_activated(QSystemTrayIcon.Trigger)
+        app.settings_window.close.assert_called_once()
+
+    def test_cancelled_worker_shows_retry_popup_and_notification(self):
+        app = self.app()
+        app.status_window = Mock()
+        retained = (np.ones(1600, dtype=np.int16), 16000, 'primary-model')
+        app.result_thread = Mock(
+            is_cancelled=True,
+            retained_recording=retained,
+            transcription_succeeded=False,
+        )
+        with patch.object(app, 'update_tray_icon'):
+            app.on_worker_finished()
+        self.assertEqual(app.failed_recordings, [retained])
+        app.status_window.show_retry.assert_called_once()
+        app.tray_icon.showMessage.assert_called_once()
+
+    def test_escape_cancel_disables_continuous_restart(self):
+        app = self.app()
+        app.settings_window.isActiveWindow.return_value = False
+        app._continue_recording = True
+        app.current_status = 'recording'
+        app.result_thread = Mock()
+        app.result_thread.isRunning.return_value = True
+        app.on_cancel_key()
+        self.assertFalse(app._continue_recording)
+        app.result_thread.cancel_recording.assert_called_once()
 
     def test_single_model_keeps_immediate_stop_behavior(self):
         app = self.app()

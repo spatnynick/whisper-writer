@@ -17,9 +17,9 @@ model_options:
       description: "Controls the randomness of the transcription output. Lower values make the output more focused and deterministic."
     initial_prompt:
       value: >-
-        I am dictating natural messages about customer projects, software development, and technical support. Earlier I ran git status, git pull, and git push, opened a pull request, and resolved merge conflicts. I wrote a Python function, a JavaScript handler, and a shell script. The service sends JSON over HTTPS through a REST API, reads a SQL database, and writes to a queue. I read logs, tail output, curl the endpoint, and SSH into the server. Async and await, promises, try and catch, null and undefined, strings and integers, booleans and arrays are common terms. I install dependencies with npm and pip, build with Docker, and debug a stack trace.
+        I am dictating natural messages about customer projects, SAP consulting, ABAP programming, Linux administration, and technical support. Use correct technical terms such as SAP, S/4HANA, ECC, HANA, Fiori, ABAP, BAPI, IDoc, RFC, BAdI, ALV, CDS view, OData, transaction codes, SE80, SE11, SE37, SPRO, ST22, SM21, transport requests, customizing, BASIS, systemd, Linux, Ubuntu, Debian, Red Hat, shell, Bash, SSH, sudo, permissions, processes, services, logs, journalctl, systemctl, grep, awk, sed, curl, Docker, and Git. Customer names, product names, commands, paths, hostnames, and ticket numbers may be dictated. Preserve capitalization, abbreviations, and punctuation.
       type: str
-      description: "Optional multi-line context used as an initial prompt to condition the transcription. The default is a natural technical-dictation sample that helps with common project and programming terms. More info: https://developers.openai.com/api/docs/guides/speech-to-text"
+      description: "Optional multi-line context used as an initial prompt to condition the transcription. The default covers customer communication, SAP consulting, ABAP programming, and Linux administration terms. More info: https://developers.openai.com/api/docs/guides/speech-to-text"
 
   # Configuration options for the OpenAI API
   api:

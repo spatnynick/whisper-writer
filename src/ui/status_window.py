@@ -3,7 +3,7 @@ import os
 import time
 from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer
 from PyQt5.QtGui import QPixmap, QIcon, QPainter, QColor
-from PyQt5.QtWidgets import QApplication, QLabel, QHBoxLayout, QVBoxLayout
+from PyQt5.QtWidgets import QApplication, QLabel, QHBoxLayout, QVBoxLayout, QPushButton, QStyle
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from ui.base_window import BaseWindow
@@ -12,17 +12,19 @@ from utils import ConfigManager
 class StatusWindow(BaseWindow):
     statusSignal = pyqtSignal(str)
     closeSignal = pyqtSignal()
+    retryRequested = pyqtSignal()
 
     def __init__(self):
         """
         Initialize the status window.
         """
-        super().__init__('', 280, 72, show_title_bar=False)
+        super().__init__('', 360, 72, show_title_bar=False)
         self.corner_radius = 28  # height // 2, for a full pill shape
         # Same colors as the tray icon's recording/transcribing glyphs (ww-logo-*.svg), so the
         # popup's border reads as the same status language rather than a new one.
         self.recording_border_color = QColor('#E53935')
         self.transcribing_border_color = QColor('#F59E0B')
+        self.cancelled_border_color = QColor('#C0392B')
         self.initStatusUI()
         self.statusSignal.connect(self.updateStatus)
 
@@ -33,7 +35,7 @@ class StatusWindow(BaseWindow):
         # A passive indicator must stay visible when another application is active.
         # Utility/Tool windows can be hidden by KWin with their inactive group.
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
-                            | Qt.ToolTip | Qt.WindowDoesNotAcceptFocus)
+                            | Qt.Tool | Qt.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
 
         status_layout = QHBoxLayout()
@@ -84,6 +86,14 @@ class StatusWindow(BaseWindow):
         status_layout.addStretch(1)
         status_layout.addWidget(self.icon_label)
         status_layout.addLayout(text_layout)
+        self.retry_button = QPushButton('Retry')
+        self.retry_button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        self.retry_button.setToolTip('Retry transcription for the retained recording')
+        self.retry_button.setFixedHeight(28)
+        self.retry_button.setFocusPolicy(Qt.NoFocus)
+        self.retry_button.hide()
+        self.retry_button.clicked.connect(self.retryRequested.emit)
+        status_layout.addWidget(self.retry_button)
         status_layout.addStretch(1)
 
         self.main_layout.addLayout(status_layout)
@@ -91,6 +101,16 @@ class StatusWindow(BaseWindow):
     def set_model(self, model_name):
         """Show the active model on the small line below the recording state."""
         self.model_label.setText(f'Model: {model_name}' if model_name else '')
+
+    def show_retry(self):
+        """Show a retry action after cancelled audio has been retained."""
+        self._stopPulse()
+        self.status_label.setText('Cancelled')
+        self.icon_label.setPixmap(self.microphone_pixmap)
+        self.border_color = self.cancelled_border_color
+        self.retry_button.show()
+        self.update()
+        self.show()
 
     def _tinted_pixmap(self, path, size, color):
         """
@@ -187,12 +207,14 @@ class StatusWindow(BaseWindow):
         Update the status window based on the given status.
         """
         if status == 'recording':
+            self.retry_button.hide()
             self.status_label.setText('Recording...')
             self._startPulse(self.microphone_pixmap, period=0.9)
             self.border_color = self.recording_border_color
             self.update()
             self.show()
         elif status == 'transcribing':
+            self.retry_button.hide()
             self.status_label.setText('Transcribing...')
             # Slightly slower period than recording, to read as "processing" rather
             # than the more urgent recording pulse.
@@ -203,6 +225,8 @@ class StatusWindow(BaseWindow):
 
         if status in ('idle', 'error', 'cancel'):
             self._stopPulse()
+            if status != 'cancel':
+                self.retry_button.hide()
             self.hide()
 
 
