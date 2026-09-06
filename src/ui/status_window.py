@@ -179,7 +179,7 @@ class StatusWindow(BaseWindow):
 
         if status in ('idle', 'error', 'cancel'):
             self._stopPulse()
-            self.close()
+            self.hide()
 
 
 if __name__ == '__main__':

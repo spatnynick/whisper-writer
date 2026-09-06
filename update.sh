@@ -1,7 +1,7 @@
 #!/bin/bash
 # Pulls the latest committed changes from GitHub into this installation and
-# restarts the running instance (if any). Safe to run any time; run.py/venv
-# and config.yaml are never touched by git so your local settings survive.
+# restarts the running instance (if any). Finish dictation before updating.
+# Gitignored venv/ and config.yaml survive; dependencies are reconciled by pip.
 #
 # Usage: ./update.sh   (from anywhere, or via the installed `whisperwriter-update` alias)
 set -euo pipefail
@@ -36,16 +36,16 @@ main() {
 
     if [ "$old_head" = "$new_head" ]; then
         echo "Already up to date (${old_head:0:7})."
-        exit 0
-    fi
+    else
 
-    echo "Updating $branch: ${old_head:0:7} -> ${new_head:0:7}"
-    git log --oneline "$old_head..$new_head"
+        echo "Updating $branch: ${old_head:0:7} -> ${new_head:0:7}"
+        git log --oneline "$old_head..$new_head"
 
-    if ! git merge --ff-only "origin/$branch"; then
-        echo "Error: local $branch has diverged from origin/$branch and can't fast-forward." >&2
-        echo "Resolve manually (git status / git log), then re-run." >&2
-        exit 1
+        if ! git merge --ff-only "origin/$branch"; then
+            echo "Error: local $branch has diverged from origin/$branch and can't fast-forward." >&2
+            echo "Resolve manually (git status / git log), then re-run." >&2
+            exit 1
+        fi
     fi
 
     # Always reconcile the venv against requirements.txt, not just when it textually
@@ -55,12 +55,12 @@ main() {
     # from an older checkout, etc). pip is idempotent and fast when nothing is missing,
     # so the safety net costs a couple of seconds even on a no-op update.
     echo "Reconciling venv against requirements.txt..."
-    venv/bin/pip install -q --upgrade pip
-    venv/bin/pip install -q -r requirements.txt
+    venv/bin/python3 -m pip install -q -r requirements.txt
+    venv/bin/python3 -m pip check
 
     echo "Update complete."
 
-    local pids
+    local pids pid
     pids="$(pgrep -f "$install_dir/venv/bin/python3 src/main.py" || true)"
 
     if [ -z "$pids" ]; then
@@ -83,9 +83,12 @@ main() {
         done
     fi
 
-    nohup "$install_dir/start.sh" >/tmp/whisper-writer-update-restart.log 2>&1 &
+    local log_dir="${XDG_CACHE_HOME:-$HOME/.cache}/whisper-writer"
+    mkdir -p "$log_dir"
+    chmod 700 "$log_dir"
+    nohup "$install_dir/start.sh" >"$log_dir/restart.log" 2>&1 &
     disown
-    echo "Restarted (log: /tmp/whisper-writer-update-restart.log)."
+    echo "Restart launched (log: $log_dir/restart.log)."
 }
 
 main "$@"

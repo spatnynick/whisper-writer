@@ -22,6 +22,10 @@ model_options:
 
   # Configuration options for the OpenAI API
   api:
+    timeout_seconds:
+      value: 120
+      type: int
+      description: "HTTP inactivity timeout in seconds. Failed requests are not automatically retried. Increase for slow transcription servers."
     model:
       value: whisper-1
       type: str

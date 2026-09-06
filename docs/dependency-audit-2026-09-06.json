@@ -1,0 +1,134 @@
+{
+  "date": "2026-09-06",
+  "method": "pip-audit against installed site-packages; advisory IDs deduplicated within each package",
+  "before": [
+    {
+      "package": "certifi",
+      "version": "2023.5.7",
+      "advisories": [
+        "PYSEC-2023-135",
+        "PYSEC-2024-230"
+      ]
+    },
+    {
+      "package": "filelock",
+      "version": "3.12.0",
+      "advisories": [
+        "PYSEC-2026-1374",
+        "PYSEC-2026-1375"
+      ]
+    },
+    {
+      "package": "h11",
+      "version": "0.14.0",
+      "advisories": [
+        "PYSEC-2026-348"
+      ]
+    },
+    {
+      "package": "idna",
+      "version": "3.4",
+      "advisories": [
+        "PYSEC-2024-60",
+        "PYSEC-2026-215"
+      ]
+    },
+    {
+      "package": "jinja2",
+      "version": "3.1.2",
+      "advisories": [
+        "PYSEC-2026-1471",
+        "PYSEC-2026-1472",
+        "PYSEC-2026-1473",
+        "PYSEC-2026-1474",
+        "PYSEC-2026-1475"
+      ]
+    },
+    {
+      "package": "pillow",
+      "version": "9.5.0",
+      "advisories": [
+        "PYSEC-2023-175",
+        "PYSEC-2023-227",
+        "PYSEC-2026-165",
+        "PYSEC-2026-1793",
+        "PYSEC-2026-1794",
+        "PYSEC-2026-2253",
+        "PYSEC-2026-2254",
+        "PYSEC-2026-2255",
+        "PYSEC-2026-2256",
+        "PYSEC-2026-2257",
+        "PYSEC-2026-2874",
+        "PYSEC-2026-3451",
+        "PYSEC-2026-3453",
+        "PYSEC-2026-3454",
+        "PYSEC-2026-3493",
+        "PYSEC-2026-3494",
+        "PYSEC-2026-3495",
+        "PYSEC-2026-3496",
+        "PYSEC-2026-457"
+      ]
+    },
+    {
+      "package": "protobuf",
+      "version": "4.25.1",
+      "advisories": [
+        "PYSEC-2026-1805",
+        "PYSEC-2026-1806"
+      ]
+    },
+    {
+      "package": "python-dotenv",
+      "version": "1.0.0",
+      "advisories": [
+        "PYSEC-2026-2270"
+      ]
+    },
+    {
+      "package": "requests",
+      "version": "2.31.0",
+      "advisories": [
+        "PYSEC-2026-1872",
+        "PYSEC-2026-1873",
+        "PYSEC-2026-2275"
+      ]
+    },
+    {
+      "package": "setuptools",
+      "version": "80.10.2",
+      "advisories": [
+        "PYSEC-2026-3447"
+      ]
+    },
+    {
+      "package": "tqdm",
+      "version": "4.65.0",
+      "advisories": [
+        "PYSEC-2026-1976"
+      ]
+    },
+    {
+      "package": "urllib3",
+      "version": "2.0.2",
+      "advisories": [
+        "PYSEC-2023-192",
+        "PYSEC-2023-212",
+        "PYSEC-2026-141",
+        "PYSEC-2026-1994",
+        "PYSEC-2026-1995",
+        "PYSEC-2026-1996",
+        "PYSEC-2026-1998",
+        "PYSEC-2026-1999"
+      ]
+    }
+  ],
+  "after": [
+    {
+      "package": "setuptools",
+      "version": "80.10.2",
+      "advisories": [
+        "PYSEC-2026-3447"
+      ]
+    }
+  ]
+}

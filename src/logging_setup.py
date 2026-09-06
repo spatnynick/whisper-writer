@@ -1,4 +1,5 @@
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 
 
@@ -32,7 +33,7 @@ def configure_logging(debug: bool):
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, 'debug.log')
 
-    file_handler = logging.FileHandler(log_path)
+    file_handler = RotatingFileHandler(log_path, maxBytes=2_000_000, backupCount=2)
     file_handler.setFormatter(formatter)
     root_logger.addHandler(file_handler)
 

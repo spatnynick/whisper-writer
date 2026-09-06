@@ -1,9 +1,8 @@
 import os
 import sys
-import time
+import logging
 from audioplayer import AudioPlayer
-from pynput.keyboard import Controller
-from PyQt5.QtCore import QObject, QProcess, QTimer, pyqtSlot
+from PyQt5.QtCore import QObject, QProcess, QTimer, Qt, pyqtSignal, pyqtSlot
 from PyQt5.QtDBus import QDBusConnection
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QAction, QMessageBox, QStyle
@@ -17,7 +16,14 @@ from input_simulation import InputSimulator
 from utils import ConfigManager
 
 
+logger = logging.getLogger(__name__)
+
+
 class WhisperWriterApp(QObject):
+    activationRequested = pyqtSignal()
+    deactivationRequested = pyqtSignal()
+    cancelRequested = pyqtSignal()
+
     def __init__(self):
         """
         Initialize the application, opening settings window if no configuration file is found.
@@ -30,6 +36,11 @@ class WhisperWriterApp(QObject):
         # by default it counts as "the last window". The tray icon should control lifetime.
         self.app.setQuitOnLastWindowClosed(False)
 
+        self._shutdown_action = None
+        self._continue_recording = False
+        self.activationRequested.connect(self.on_activation, Qt.QueuedConnection)
+        self.deactivationRequested.connect(self.on_deactivation, Qt.QueuedConnection)
+        self.cancelRequested.connect(self.on_cancel_key, Qt.QueuedConnection)
         ConfigManager.initialize()
 
         self.settings_window = SettingsWindow()
@@ -88,9 +99,9 @@ class WhisperWriterApp(QObject):
         self.input_simulator = InputSimulator()
 
         self.key_listener = KeyListener()
-        self.key_listener.add_callback("on_activate", self.on_activation)
-        self.key_listener.add_callback("on_deactivate", self.on_deactivation)
-        self.key_listener.add_callback("on_cancel_key", self.on_cancel_key)
+        self.key_listener.add_callback("on_activate", self.activationRequested.emit)
+        self.key_listener.add_callback("on_deactivate", self.deactivationRequested.emit)
+        self.key_listener.add_callback("on_cancel_key", self.cancelRequested.emit)
 
         model_options = ConfigManager.get_config_section('model_options')
         model_path = model_options.get('local', {}).get('model_path')
@@ -112,6 +123,7 @@ class WhisperWriterApp(QObject):
 
         if not ConfigManager.get_config_value('misc', 'hide_status_window'):
             self.status_window = StatusWindow()
+            self.status_window.closeSignal.connect(self.stop_result_thread)
 
         self.create_tray_icon()
         self.key_listener.start()
@@ -190,23 +202,34 @@ class WhisperWriterApp(QObject):
         )
 
     def cleanup(self):
-        if self.key_listener:
+        if getattr(self, 'key_listener', None):
             self.key_listener.stop()
-        if self.input_simulator:
+        if getattr(self, 'input_simulator', None):
             self.input_simulator.cleanup()
 
     def exit_app(self):
-        """
-        Exit the application.
-        """
-        self.cleanup()
-        QApplication.quit()
+        self._request_shutdown('exit')
 
     def restart_app(self):
-        """Restart the application to apply the new settings."""
+        self._request_shutdown('restart')
+
+    def _request_shutdown(self, action):
+        # Keep Qt and the QThread alive until the worker has released its resources.
+        self._shutdown_action = action
+        self._continue_recording = False
+        if getattr(self, 'key_listener', None):
+            self.key_listener.stop()
+        thread = getattr(self, 'result_thread', None)
+        if thread and thread.isRunning():
+            thread.stop()
+            return
+        self._finish_shutdown()
+
+    def _finish_shutdown(self):
         self.cleanup()
         QApplication.quit()
-        QProcess.startDetached(sys.executable, sys.argv)
+        if self._shutdown_action == 'restart':
+            QProcess.startDetached(sys.executable, sys.argv)
 
     def apply_live_settings(self):
         """
@@ -243,6 +266,7 @@ class WhisperWriterApp(QObject):
                 self.stop_result_thread()
             return
 
+        self._continue_recording = ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous'
         self.start_result_thread()
 
     def on_deactivation(self):
@@ -257,22 +281,23 @@ class WhisperWriterApp(QObject):
         """
         Start the result thread to record audio and transcribe it.
         """
-        if self.result_thread and self.result_thread.isRunning():
+        if self._shutdown_action or self.result_thread is not None:
             return
 
         self.result_thread = ResultThread(self.local_model)
         if not ConfigManager.get_config_value('misc', 'hide_status_window'):
             self.result_thread.statusSignal.connect(self.status_window.updateStatus)
-            self.status_window.closeSignal.connect(self.stop_result_thread)
         self.result_thread.statusSignal.connect(self.update_tray_icon)
         self.result_thread.statusSignal.connect(self.on_status_changed)
         self.result_thread.resultSignal.connect(self.on_transcription_complete)
+        self.result_thread.finished.connect(self.on_worker_finished)
         self.result_thread.start()
 
     def stop_result_thread(self):
         """
         Stop the result thread.
         """
+        self._continue_recording = False
         if self.result_thread and self.result_thread.isRunning():
             self.result_thread.stop()
 
@@ -292,11 +317,24 @@ class WhisperWriterApp(QObject):
             elif previous_status == 'recording' and status != 'recording':
                 self.recording_stop_sound.play(block=False)
 
-        if status == 'cancel':
-            if ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous':
-                self.start_result_thread()
-            else:
-                self.key_listener.start()
+        if status == 'error':
+            self._continue_recording = False
+            self.tray_icon.showMessage('WhisperWriter', 'Recording or transcription failed. See the application log; please retry.', QSystemTrayIcon.Warning, 5000)
+
+    def on_worker_finished(self):
+        thread = self.result_thread
+        self.result_thread = None
+        if thread:
+            thread.deleteLater()
+        if self._shutdown_action:
+            self._finish_shutdown()
+        elif self._continue_recording:
+            self.start_result_thread()
+        else:
+            self.on_status_changed('idle')
+            self.update_tray_icon('idle')
+            if getattr(self, 'status_window', None):
+                self.status_window.updateStatus('idle')
 
     def on_cancel_key(self):
         """
@@ -310,6 +348,8 @@ class WhisperWriterApp(QObject):
         """
         When the transcription is complete, type the result and start listening for the activation key again.
         """
+        if self._shutdown_action or not result:
+            return
         self.last_transcript = result
         self.copy_last_transcript_action.setEnabled(bool(result))
 
@@ -323,14 +363,16 @@ class WhisperWriterApp(QObject):
         # check (see fix #2 in FORK_NOTES.md) until the app is restarted, with the
         # activation hotkey silently never firing again.
         self.key_listener.stop()
-        self.input_simulator.typewrite(result)
-        self.key_listener.start()
+        try:
+            self.input_simulator.typewrite(result)
+        except Exception:
+            logger.exception('Unable to type transcript')
+            self.tray_icon.showMessage('WhisperWriter', 'Typing failed. Use Copy Last Transcript to recover the text.', QSystemTrayIcon.Warning, 5000)
+        finally:
+            self.key_listener.start()
 
         if ConfigManager.get_config_value('misc', 'noise_on_completion'):
             AudioPlayer(os.path.join('assets', 'beep.wav')).play(block=True)
-
-        if ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous':
-            self.start_result_thread()
 
     def run(self):
         """

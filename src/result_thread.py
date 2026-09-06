@@ -3,11 +3,9 @@ import time
 import traceback
 import numpy as np
 import pyaudio
-import tempfile
-import wave
 import webrtcvad
 from PyQt5.QtCore import QThread, QMutex, pyqtSignal
-from collections import deque
+from queue import Queue, Empty, Full
 from threading import Event
 
 from transcription import transcribe
@@ -43,7 +41,7 @@ class ResultThread(QThread):
         """
         super().__init__()
         self.local_model = local_model
-        self.is_recording = False
+        self.is_recording = True
         self.is_running = True
         self.is_cancelled = False
         self.sample_rate = None
@@ -67,18 +65,13 @@ class ResultThread(QThread):
         self.mutex.lock()
         self.is_running = False
         self.mutex.unlock()
-        self.statusSignal.emit('idle')
-        self.wait()
+        self.stop_recording()
 
     def run(self):
         """Main execution method for the thread."""
         try:
             if not self.is_running:
                 return
-
-            self.mutex.lock()
-            self.is_recording = True
-            self.mutex.unlock()
 
             self.statusSignal.emit('recording')
             ConfigManager.console_print('Recording...')
@@ -117,21 +110,23 @@ class ResultThread(QThread):
             self.statusSignal.emit('idle')
             self.resultSignal.emit(result)
 
-        except Exception as e:
+        except Exception:
             traceback.print_exc()
             self.statusSignal.emit('error')
-            self.resultSignal.emit('')
+
         finally:
             self.stop_recording()
 
     def _record_audio(self):
         """
-        Record audio from the microphone and save it to a temporary file.
+        Record PCM audio in memory, preserving callback frame order.
 
         :return: numpy array of audio data, or None if the recording is too short
         """
         recording_options = ConfigManager.get_config_section('recording_options')
         self.sample_rate = recording_options.get('sample_rate') or 16000
+        if not ConfigManager.get_config_value('model_options', 'use_api') and self.sample_rate != 16000:
+            raise ValueError('Local transcription requires a 16000 Hz recording sample rate.')
         frame_duration_ms = 30  # 30ms frame duration for WebRTC VAD
         frame_size = int(self.sample_rate * (frame_duration_ms / 1000.0))
         silence_duration_ms = recording_options.get('silence_duration') or 900
@@ -148,17 +143,17 @@ class ResultThread(QThread):
             speech_detected = False
             silent_frame_count = 0
 
-        audio_buffer = deque(maxlen=frame_size)
-        recording = []
-
-        data_ready = Event()
+        audio_frames = Queue(maxsize=100)  # Three seconds of scheduling slack.
+        overflow = Event()
+        recording = bytearray()
 
         def audio_callback(in_data, frame_count, time_info, status):
             if status:
-                ConfigManager.console_print(f"Audio callback status: {status}")
-            indata = np.frombuffer(in_data, dtype=np.int16)
-            audio_buffer.extend(indata)
-            data_ready.set()
+                overflow.set()
+            try:
+                audio_frames.put_nowait(in_data)
+            except Full:
+                overflow.set()
             return (None, pyaudio.paContinue)
 
         sound_device = recording_options.get('sound_device')
@@ -171,16 +166,15 @@ class ResultThread(QThread):
             logger.debug(f"Audio stream opened: sample_rate={self.sample_rate} device={sound_device} recording_mode={recording_mode}")
             try:
                 while self.is_running and self.is_recording:
-                    data_ready.wait()
-                    data_ready.clear()
-
-                    if len(audio_buffer) < frame_size:
+                    if overflow.is_set():
+                        raise RuntimeError('Audio capture overflowed; recording is incomplete. Please retry.')
+                    try:
+                        frame_bytes = audio_frames.get(timeout=0.1)
+                    except Empty:
+                        if not stream.is_active():
+                            raise RuntimeError('Microphone stream stopped unexpectedly.')
                         continue
-
-                    # Save frame
-                    frame = np.array(list(audio_buffer), dtype=np.int16)
-                    audio_buffer.clear()
-                    recording.extend(frame)
+                    recording.extend(frame_bytes)
 
                     # Avoid trying to detect voice in initial frames
                     if initial_frames_to_skip > 0:
@@ -188,7 +182,7 @@ class ResultThread(QThread):
                         continue
 
                     if vad:
-                        if vad.is_speech(frame.tobytes(), self.sample_rate):
+                        if vad.is_speech(frame_bytes, self.sample_rate):
                             silent_frame_count = 0
                             if not speech_detected:
                                 ConfigManager.console_print("Speech detected.")
@@ -205,7 +199,9 @@ class ResultThread(QThread):
         finally:
             audio.terminate()
 
-        audio_data = np.array(recording, dtype=np.int16)
+        if overflow.is_set():
+            raise RuntimeError('Audio capture overflowed; recording is incomplete. Please retry.')
+        audio_data = np.frombuffer(recording, dtype=np.int16)
         duration = len(audio_data) / self.sample_rate
 
         ConfigManager.console_print(f'Recording finished. Size: {audio_data.size} samples, Duration: {duration:.2f} seconds')

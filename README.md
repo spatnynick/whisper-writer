@@ -1,5 +1,10 @@
 # <img src="./assets/ww-logo.png" alt="WhisperWriter icon" width="25" height="25"> WhisperWriter
 
+> **Personal fork:** For current Ubuntu setup, operation and multi-computer updates, use
+> [FORK_NOTES.md](FORK_NOTES.md). The upstream documentation below is historical and some
+> dependency/device instructions no longer apply. See [REVIEW.md](REVIEW.md) for the
+> September 2026 critical-path review, remaining risks and feature plans.
+
 ![version](https://img.shields.io/badge/version-1.0.1-blue)
 
 <p align="center">

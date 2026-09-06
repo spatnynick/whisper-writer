@@ -4,6 +4,27 @@ Personal fork of [savbell/whisper-writer](https://github.com/savbell/whisper-wri
 hotkey-triggered dictation tool. Run on three computers from this same fork; `origin` is
 this fork, `upstream` is the original (unmaintained since Aug 2024) project.
 
+## Current maintenance notes (2026-09-06)
+
+See [REVIEW.md](REVIEW.md) for fixed critical issues, verification, dependency audit and
+remaining topics. Recording during transcription and suppressing Escape in the focused
+application are planned there; neither is enabled by this update.
+
+On each other computer, finish dictation and run `./update.sh`. A plain `git pull` updates
+code only: follow it with `venv/bin/python3 -m pip install -r requirements.txt` and
+`venv/bin/python3 -m pip check`, then restart. The updater now performs dependency repair
+and restarts a running instance even if Git is already current. It no longer upgrades pip.
+Restart output is in `${XDG_CACHE_HOME:-~/.cache}/whisper-writer/restart.log`.
+
+The launcher preserves `OPENAI_API_KEY`; `.env` supplies it when absent from the environment.
+A custom endpoint without a key receives a placeholder. `model_options.api.timeout_seconds`
+defaults to 120 seconds of HTTP inactivity; increase it in Settings for a slower server.
+Requests are not retried automatically. Exit/settings restart waits for active worker work
+without blocking Qt; a native model call still has to finish. Complete dictation before an
+external process restart/update, which terminates in-flight work.
+
+Earlier dated sections below describe the history and may show superseded behavior.
+
 ## Why this fork exists
 
 Upstream doesn't work out of the box on a current Ubuntu system. Three real bugs, all fixed here:

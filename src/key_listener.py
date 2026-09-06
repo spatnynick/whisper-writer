@@ -297,7 +297,7 @@ class KeyChord:
             and now - self.pressed_at.get(key, now) > self.STALE_EXTRA_KEY_SECONDS
         ]
         for key in stale:
-            logger.debug(f"key event: dropping stale extra key {key} (likely a lost release event)")
+            logger.debug("key event: dropping a stale extra key (likely a lost release event)")
             self.pressed_keys.discard(key)
             self.pressed_at.pop(key, None)
 
@@ -438,7 +438,6 @@ class KeyListener:
     def on_input_event(self, event):
         """Handle input events and trigger callbacks if the key chord becomes active or inactive."""
         key, event_type = event
-        logger.debug(f"key event: {key} {event_type}")
 
         if key == KeyCode.ESC and event_type == InputEvent.KEY_PRESS:
             self._trigger_callbacks("on_cancel_key")

@@ -1,5 +1,6 @@
 import yaml
 import os
+import tempfile
 
 class ConfigManager:
     _instance = None
@@ -98,16 +99,24 @@ class ConfigManager:
         """Load user configuration and merge with default config."""
         def deep_update(source, overrides):
             for key, value in overrides.items():
-                if isinstance(value, dict) and key in source:
-                    deep_update(source[key], value)
-                else:
+                if key not in source:
+                    continue
+                if isinstance(source[key], dict):
+                    if isinstance(value, dict):
+                        deep_update(source[key], value)
+                    else:
+                        print(f"Ignoring invalid configuration section: {key}")
+                elif not isinstance(value, (dict, list)):
                     source[key] = value
 
         if config_path and os.path.isfile(config_path):
             try:
                 with open(config_path, 'r', encoding='utf-8-sig') as file:
                     user_config = yaml.safe_load(file)
-                    deep_update(self.config, user_config)
+                    if isinstance(user_config, dict):
+                        deep_update(self.config, user_config)
+                    elif user_config is not None:
+                        print("Invalid configuration: expected a mapping. Using defaults.")
             except yaml.YAMLError:
                 print("Error in configuration file. Using default configuration.")
 
@@ -116,8 +125,19 @@ class ConfigManager:
         """Save the current configuration to a YAML file."""
         if cls._instance is None:
             raise RuntimeError("ConfigManager not initialized")
-        with open(config_path, 'w', encoding='utf-8') as file:
-            yaml.dump(cls._instance.config, file, default_flow_style=False)
+        directory = os.path.dirname(os.path.abspath(config_path))
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=directory,
+                                             delete=False) as file:
+                temporary_path = file.name
+                yaml.safe_dump(cls._instance.config, file, default_flow_style=False)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary_path, config_path)
+        finally:
+            if temporary_path and os.path.exists(temporary_path):
+                os.unlink(temporary_path)
 
     @classmethod
     def reload_config(cls):

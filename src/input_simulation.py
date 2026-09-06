@@ -20,7 +20,7 @@ def run_command_or_exit_on_failure(command):
         subprocess.run(command, check=True)
     except subprocess.CalledProcessError as e:
         print(f"Error running command: {e}")
-        exit(1)
+        raise RuntimeError(f"Input command failed: {command[0]}") from e
 
 class InputSimulator:
     """
@@ -111,6 +111,8 @@ class InputSimulator:
             text (str): The text to type.
             interval (float): The interval between keystrokes in seconds.
         """
+        if '\n' in text or '\r' in text:
+            raise ValueError('Multiline text cannot safely be sent through the dotool command protocol; use Copy Last Transcript.')
         assert self.dotool_process and self.dotool_process.stdin
         self.dotool_process.stdin.write(f"typedelay {interval * 1000}\n")
         self.dotool_process.stdin.write(f"type {text}\n")
