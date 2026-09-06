@@ -23,7 +23,7 @@ installed-package audit, not a guarantee that all vulnerabilities or hardware fa
 | Medium | Empty/non-mapping YAML or malformed sections crashed config loading; interrupted saves could truncate config. | Ignore invalid section shapes and save YAML via an atomic replacement. Full scalar validation remains open. |
 | Medium | HTTP clients were not explicitly closed; default SDK retries prolonged failures. | Close each client; disable automatic retries; add a 120-second configurable HTTP inactivity timeout. This is not a total request deadline. |
 | Medium | Local transcription interpreted non-16-kHz arrays as 16-kHz audio. | Reject incompatible local recording rates before opening the microphone. API WAV files retain the configured sample rate. |
-| Medium | There was no in-app way to discover and apply a newer commit. | The tray Update action now checks `origin/<current branch>` asynchronously, reports when current, and starts the existing fast-forward updater when a commit is available. |
+| Medium | There was no in-app way to discover and apply a newer commit. | The tray Update action now checks `origin/<current branch>` asynchronously, shows a dedicated updating icon while checking/applying, keeps the current-state dialog, and starts the existing fast-forward updater silently when a commit is available. |
 
 Dependency audit evidence, with duplicate advisory IDs removed, is in
 [docs/dependency-audit-2026-09-06.json](docs/dependency-audit-2026-09-06.json).

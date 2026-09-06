@@ -49,6 +49,11 @@ class ReliabilityTests(unittest.TestCase):
         app.key_listener = Mock()
         app.input_simulator = Mock()
         app.tray_icon = Mock()
+        app.tray_icon_idle = Mock()
+        app.tray_icon_recording = Mock()
+        app.tray_icon_transcribing = Mock()
+        app.tray_icon_error = Mock()
+        app.tray_icon_updating = Mock()
         app.copy_last_transcript_action = Mock()
         app.settings_window = Mock()
         app.settings_window.isVisible.return_value = False
@@ -62,6 +67,8 @@ class ReliabilityTests(unittest.TestCase):
         with patch.object(app, '_show_update_message') as show:
             app._on_update_check_finished(0, None)
         show.assert_called_once_with('WhisperWriter', 'No update available. This installation is current.')
+        app.tray_icon.showMessage.assert_not_called()
+        app.tray_icon.setIcon.assert_called_with(app.tray_icon_idle)
         process.deleteLater.assert_called_once()
         app.update_action.setEnabled.assert_called_with(True)
 
@@ -86,17 +93,33 @@ class ReliabilityTests(unittest.TestCase):
     def test_update_is_blocked_while_worker_is_active(self):
         app = self.app()
         app.result_thread = Mock()
-        app.check_for_updates()
-        app.tray_icon.showMessage.assert_called_once()
+        with patch.object(app, '_show_update_message') as show:
+            app.check_for_updates()
+        show.assert_called_once()
+        app.tray_icon.showMessage.assert_not_called()
         app.update_action.setEnabled.assert_not_called()
 
     def test_update_is_blocked_while_failed_audio_is_recoverable(self):
         app = self.app()
         app.failed_recordings = [('audio', 16000)]
-        app.check_for_updates()
-        app.tray_icon.showMessage.assert_called_once()
-        self.assertIn('Retry', app.tray_icon.showMessage.call_args.args[1])
+        with patch.object(app, '_show_update_message') as show:
+            app.check_for_updates()
+        show.assert_called_once()
+        self.assertIn('Retry', show.call_args.args[1])
+        app.tray_icon.showMessage.assert_not_called()
         app.update_action.setEnabled.assert_not_called()
+
+    def test_update_check_and_apply_change_tray_icon_without_notifications(self):
+        app = self.app()
+        app._set_update_indicator('checking')
+        app.tray_icon.setIcon.assert_called_with(app.tray_icon_updating)
+        app.tray_icon.setToolTip.assert_called_with('WhisperWriter — checking...')
+        app.tray_icon.reset_mock()
+        with patch('main.QProcess.startDetached', return_value=(True, 123)):
+            app._start_update()
+        app.tray_icon.setIcon.assert_called_with(app.tray_icon_updating)
+        app.tray_icon.showMessage.assert_not_called()
+        app.tray_icon.setToolTip.assert_called_with('WhisperWriter — updating...')
 
     def test_detached_update_failure_reenables_action(self):
         app = self.app()

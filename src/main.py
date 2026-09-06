@@ -152,6 +152,7 @@ class WhisperWriterApp(QObject):
         self.tray_icon_recording = QIcon(os.path.join('assets', 'ww-logo-recording.png'))
         self.tray_icon_transcribing = QIcon(os.path.join('assets', 'ww-logo-transcribing.png'))
         self.tray_icon_error = QIcon(os.path.join('assets', 'ww-logo-error.svg'))
+        self.tray_icon_updating = QIcon(os.path.join('assets', 'ww-logo-updating.svg'))
 
         self.tray_icon = QSystemTrayIcon(self.tray_icon_idle, self.app)
         self.tray_icon.setToolTip('WhisperWriter — Idle')
@@ -211,19 +212,11 @@ class WhisperWriterApp(QObject):
                 if self.failed_recordings and self.result_thread is None
                 else 'Finish the current recording or transcription before updating.'
             )
-            self.tray_icon.showMessage(
-                'WhisperWriter',
-                detail,
-                QSystemTrayIcon.Information,
-                4000,
-            )
+            self._show_update_message('Update unavailable', detail, QMessageBox.Warning)
             return
 
         self.update_action.setEnabled(False)
-        self.tray_icon.showMessage(
-            'WhisperWriter', 'Checking GitHub for updates...',
-            QSystemTrayIcon.Information, 2500,
-        )
+        self._set_update_indicator('checking')
         process = QProcess(self)
         process.setWorkingDirectory(PROJECT_ROOT)
         process.setProcessChannelMode(QProcess.MergedChannels)
@@ -240,11 +233,19 @@ class WhisperWriterApp(QObject):
             process.deleteLater()
         return process
 
+    def _set_update_indicator(self, phase):
+        self.tray_icon.setIcon(self.tray_icon_updating)
+        self.tray_icon.setToolTip(f'WhisperWriter — {phase}...')
+
+    def _restore_update_indicator(self):
+        self.update_tray_icon(getattr(self, 'current_status', 'idle'))
+
     def _on_update_check_error(self, error):
         process = self._update_process
         if process is None or process.state() != QProcess.NotRunning:
             return
         self._clear_update_process()
+        self._restore_update_indicator()
         logger.warning('Update check process failed: %s', error)
         self._show_update_message(
             'Update check failed',
@@ -260,6 +261,7 @@ class WhisperWriterApp(QObject):
         self._clear_update_process()
 
         if exit_code == 0 and 'NO_UPDATE' in output:
+            self._restore_update_indicator()
             self._show_update_message('WhisperWriter', 'No update available. This installation is current.')
             return
         if exit_code == 10 and 'UPDATE_AVAILABLE' in output:
@@ -267,6 +269,7 @@ class WhisperWriterApp(QObject):
             return
 
         logger.warning('Update check exited with code %s: %s', exit_code, output.strip())
+        self._restore_update_indicator()
         self._show_update_message(
             'Update check failed',
             'WhisperWriter could not determine whether an update is available. Check the application log and try again.',
@@ -275,14 +278,12 @@ class WhisperWriterApp(QObject):
 
     def _start_update(self):
         self.update_action.setEnabled(False)
-        self.tray_icon.showMessage(
-            'WhisperWriter', 'Update available. Updating and restarting...',
-            QSystemTrayIcon.Information, 5000,
-        )
+        self._set_update_indicator('updating')
         started, _pid = QProcess.startDetached(UPDATE_SCRIPT, [], PROJECT_ROOT)
         if started:
             return
         self.update_action.setEnabled(True)
+        self._restore_update_indicator()
         self._show_update_message(
             'Update failed',
             'WhisperWriter found an update but could not start the updater. Run ./update.sh manually.',

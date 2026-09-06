@@ -18,9 +18,11 @@ Restart output is in `${XDG_CACHE_HOME:-~/.cache}/whisper-writer/restart.log`.
 
 The tray's **Update** action runs `./update.sh --check-only` against the `origin` remote
 and current branch. If the checkout is current it opens an information popup; if a newer
-commit exists it starts the normal dependency-repair and restart path. The action refuses
-to update while a recording/transcription is active or a failed recording is waiting for
-retry, so audio work is not interrupted or silently lost.
+commit exists it changes the tray icon while starting the normal dependency-repair and
+restart path, without a desktop notification. The icon returns to normal after a check
+failure or when no update is available; the latter also opens the information popup. The
+action refuses to update while a recording/transcription is active or a failed recording
+is waiting for retry, so audio work is not interrupted or silently lost.
 
 The launcher preserves `OPENAI_API_KEY`; `.env` supplies it when absent from the environment.
 A custom endpoint without a key receives a placeholder. `model_options.api.timeout_seconds`
