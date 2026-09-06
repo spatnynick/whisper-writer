@@ -67,6 +67,7 @@ rev-parse)
     fi
     ;;
 status|fetch) exit 0 ;;
+merge-base) exit 0 ;;
 *) exit 99 ;;
 esac
 ''')

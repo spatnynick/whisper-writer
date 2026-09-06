@@ -205,10 +205,15 @@ class WhisperWriterApp(QObject):
             return
         if self._shutdown_action:
             return
-        if self.result_thread is not None:
+        if self.result_thread is not None or self.failed_recordings:
+            detail = (
+                'Retry the failed transcription or start a new recording before updating.'
+                if self.failed_recordings and self.result_thread is None
+                else 'Finish the current recording or transcription before updating.'
+            )
             self.tray_icon.showMessage(
                 'WhisperWriter',
-                'Finish the current recording or transcription before updating.',
+                detail,
                 QSystemTrayIcon.Information,
                 4000,
             )

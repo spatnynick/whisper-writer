@@ -55,7 +55,7 @@ main() {
             exit 0
         fi
         echo "Already up to date (${old_head:0:7})."
-    else
+    elif git merge-base --is-ancestor "$old_head" "$new_head"; then
         echo "UPDATE_AVAILABLE"
         if [ "$check_only" -eq 1 ]; then
             exit 10
@@ -69,6 +69,9 @@ main() {
             echo "Resolve manually (git status / git log), then re-run." >&2
             exit 1
         fi
+    else
+        echo "Error: local $branch is ahead of or diverged from origin/$branch; refusing to update." >&2
+        exit 1
     fi
 
     # Always reconcile the venv against requirements.txt, not just when it textually

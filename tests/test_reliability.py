@@ -90,6 +90,14 @@ class ReliabilityTests(unittest.TestCase):
         app.tray_icon.showMessage.assert_called_once()
         app.update_action.setEnabled.assert_not_called()
 
+    def test_update_is_blocked_while_failed_audio_is_recoverable(self):
+        app = self.app()
+        app.failed_recordings = [('audio', 16000)]
+        app.check_for_updates()
+        app.tray_icon.showMessage.assert_called_once()
+        self.assertIn('Retry', app.tray_icon.showMessage.call_args.args[1])
+        app.update_action.setEnabled.assert_not_called()
+
     def test_detached_update_failure_reenables_action(self):
         app = self.app()
         with patch('main.QProcess.startDetached', return_value=(False, None)), patch.object(app, '_show_update_message') as show:
