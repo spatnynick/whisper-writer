@@ -33,7 +33,7 @@ model_options:
     secondary_model:
       value: null
       type: str
-      description: "Optional secondary transcription model. Shortcut presses alternate between the primary and secondary model; leave empty to use the primary every time."
+      description: "Optional secondary transcription model. While recording, hold the activation shortcut to switch between primary and secondary; release a short press to stop recording and transcribe with the selected model. Leave empty to disable switching."
     timeout_seconds:
       value: 120
       type: int

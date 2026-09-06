@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock, patch
 import numpy as np
-from PyQt5.QtCore import QObject, QThread, Qt
+from PyQt5.QtCore import QObject, QThread, Qt, QTimer
 from PyQt5.QtWidgets import QApplication, QComboBox, QLabel, QLineEdit, QTextEdit, QWidget
 from utils import ConfigManager
 from result_thread import ResultThread
@@ -44,8 +44,14 @@ class ReliabilityTests(unittest.TestCase):
         app._shutdown_action = None
         app._continue_recording = False
         app._update_process = None
-        app._model_press_count = 0
+        app._model_slot = 0
         app.active_model_name = None
+        app._model_hold_pending = False
+        app._model_hold_triggered = False
+        app._model_hold_timer = QTimer()
+        app._model_hold_timer.setSingleShot(True)
+        app._model_hold_timer.setInterval(app.MODEL_SWITCH_HOLD_MS)
+        app._model_hold_timer.timeout.connect(app._on_model_hold)
         app.local_model = None
         app.result_thread = None
         app.current_status = 'idle'
@@ -408,7 +414,7 @@ class ReliabilityTests(unittest.TestCase):
         app.tray_icon.setIcon.assert_called_with(app.tray_icon_error)
         self.assertIn('retry available', app.tray_icon.setToolTip.call_args.args[0])
 
-    def test_model_selection_alternates_across_activation_presses(self):
+    def test_model_selection_alternates_with_long_holds_and_short_stop(self):
         app = self.app()
         ConfigManager.set_config_value(True, 'model_options', 'use_api')
         ConfigManager.set_config_value('primary-model', 'model_options', 'api', 'model')
@@ -424,9 +430,23 @@ class ReliabilityTests(unittest.TestCase):
         app.result_thread.isRunning.return_value = True
         app.current_status = 'recording'
         app.on_activation()
+        self.assertEqual(app.active_model_name, 'primary-model')
+        self.assertTrue(app._model_hold_pending)
+        app.result_thread.stop_recording.assert_not_called()
+
+        app._on_model_hold()
         self.assertEqual(app.active_model_name, 'secondary-model')
         self.assertEqual(app.result_thread.model_name, 'secondary-model')
         self.assertIn('Model: secondary-model', app.tray_icon.setToolTip.call_args.args[0])
+        app.on_deactivation()
+        app.result_thread.stop_recording.assert_not_called()
+
+        app.on_activation()
+        app._on_model_hold()
+        self.assertEqual(app.active_model_name, 'primary-model')
+        app.on_deactivation()
+        app.on_activation()
+        app.on_deactivation()
         app.result_thread.stop_recording.assert_called_once()
 
         app.result_thread = None
@@ -436,11 +456,14 @@ class ReliabilityTests(unittest.TestCase):
             third_worker = start.call_args.args[0]
         self.assertEqual(third_worker.model_name, 'primary-model')
 
+    def test_single_model_keeps_immediate_stop_behavior(self):
+        app = self.app()
         app.result_thread = Mock()
         app.result_thread.isRunning.return_value = True
         app.current_status = 'recording'
         app.on_activation()
-        self.assertEqual(app.active_model_name, 'secondary-model')
+        app.result_thread.stop_recording.assert_called_once()
+        self.assertFalse(app._model_hold_pending)
 
     def test_next_recording_discards_previous_failed_audio(self):
         app = self.app()

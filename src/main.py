@@ -26,6 +26,7 @@ class WhisperWriterApp(QObject):
     activationRequested = pyqtSignal()
     deactivationRequested = pyqtSignal()
     cancelRequested = pyqtSignal()
+    MODEL_SWITCH_HOLD_MS = 600
 
     def __init__(self):
         """
@@ -44,8 +45,14 @@ class WhisperWriterApp(QObject):
         self._shutdown_action = None
         self._continue_recording = False
         self._update_process = None
-        self._model_press_count = 0
+        self._model_slot = 0
         self.active_model_name = None
+        self._model_hold_pending = False
+        self._model_hold_triggered = False
+        self._model_hold_timer = QTimer(self)
+        self._model_hold_timer.setSingleShot(True)
+        self._model_hold_timer.setInterval(self.MODEL_SWITCH_HOLD_MS)
+        self._model_hold_timer.timeout.connect(self._on_model_hold)
         self.activationRequested.connect(self.on_activation, Qt.QueuedConnection)
         self.deactivationRequested.connect(self.on_deactivation, Qt.QueuedConnection)
         self.cancelRequested.connect(self.on_cancel_key, Qt.QueuedConnection)
@@ -346,13 +353,72 @@ class WhisperWriterApp(QObject):
             secondary = None
         return primary, secondary
 
-    def _model_for_next_press(self):
-        """Alternate the selected model on accepted activation presses."""
+    def _selected_model(self):
+        """Return the selected model slot, falling back to primary if secondary is disabled."""
         primary, secondary = self._configured_model_pair()
-        press_count = getattr(self, '_model_press_count', 0)
-        use_secondary = press_count % 2 == 1 and secondary
-        self._model_press_count = press_count + 1
-        return secondary if use_secondary else primary
+        if getattr(self, '_model_slot', 0) == 1 and secondary:
+            return secondary
+        return primary
+
+    def _switch_model(self):
+        """Toggle the selected model slot while keeping the current recording alive."""
+        _primary, secondary = self._configured_model_pair()
+        if secondary:
+            self._model_slot = 1 - getattr(self, '_model_slot', 0)
+        else:
+            self._model_slot = 0
+        return self._selected_model()
+
+    def _begin_model_hold(self):
+        """Wait briefly to distinguish a short stop press from a long model-switch press."""
+        timer = getattr(self, '_model_hold_timer', None)
+        if timer is None:
+            return
+        if timer.isActive():
+            return
+        self._model_hold_pending = True
+        self._model_hold_triggered = False
+        timer.start()
+
+    def _cancel_model_hold(self):
+        timer = getattr(self, '_model_hold_timer', None)
+        if timer is not None:
+            timer.stop()
+        self._model_hold_pending = False
+        self._model_hold_triggered = False
+
+    def _recording_worker_active(self, worker=None):
+        """Handle the brief gap before the worker's queued recording status reaches Qt."""
+        worker = worker or getattr(self, 'result_thread', None)
+        if not worker or not worker.isRunning():
+            return False
+        if self.current_status == 'recording':
+            return True
+        return self.current_status == 'idle' and bool(getattr(worker, 'is_recording', False))
+
+    def _on_model_hold(self):
+        """Switch models after the activation shortcut has been held while recording."""
+        if not getattr(self, '_model_hold_pending', False):
+            return
+        worker = getattr(self, 'result_thread', None)
+        if not self._recording_worker_active(worker):
+            self._cancel_model_hold()
+            return
+        _primary, secondary = self._configured_model_pair()
+        if not secondary:
+            self._cancel_model_hold()
+            self._finish_short_model_press()
+            return
+        self._model_hold_triggered = True
+        self._set_active_model(self._switch_model())
+
+    def _finish_short_model_press(self):
+        """Stop capture for a short activation press and let the worker transcribe it."""
+        worker = getattr(self, 'result_thread', None)
+        if not worker or not worker.isRunning():
+            return
+        self._continue_recording = False
+        worker.stop_recording()
 
     def _set_active_model(self, model_name):
         """Set the model snapshot shown by the tray/status indicators and worker."""
@@ -397,6 +463,7 @@ class WhisperWriterApp(QObject):
         )
 
     def cleanup(self):
+        self._cancel_model_hold()
         if getattr(self, 'escape_guard', None):
             self.escape_guard.close()
         if getattr(self, 'key_listener', None):
@@ -415,6 +482,7 @@ class WhisperWriterApp(QObject):
         if getattr(self, 'escape_guard', None):
             self.escape_guard.set_active(False)
         self._shutdown_action = action
+        self._cancel_model_hold()
         self._continue_recording = False
         if getattr(self, 'key_listener', None):
             self.key_listener.stop()
@@ -458,22 +526,27 @@ class WhisperWriterApp(QObject):
         Called when the activation key combination is pressed.
         """
         if self.result_thread and self.result_thread.isRunning():
-            if self.current_status == 'recording':
-                self._set_active_model(self._model_for_next_press())
-            recording_mode = ConfigManager.get_config_value('recording_options', 'recording_mode')
-            if recording_mode == 'press_to_toggle':
-                self.result_thread.stop_recording()
-            elif recording_mode == 'continuous':
-                self.stop_result_thread()
+            if self._recording_worker_active(self.result_thread):
+                _primary, secondary = self._configured_model_pair()
+                if secondary:
+                    self._begin_model_hold()
+                else:
+                    self._finish_short_model_press()
             return
 
         self._continue_recording = ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous'
-        self.start_result_thread(model_name=self._model_for_next_press())
+        self.start_result_thread(model_name=self._selected_model())
 
     def on_deactivation(self):
         """
         Called when the activation key combination is released.
         """
+        if getattr(self, '_model_hold_pending', False):
+            was_long_press = self._model_hold_triggered
+            self._cancel_model_hold()
+            if not was_long_press:
+                self._finish_short_model_press()
+            return
         if ConfigManager.get_config_value('recording_options', 'recording_mode') == 'hold_to_record':
             if self.result_thread and self.result_thread.isRunning():
                 self.result_thread.stop_recording()
@@ -488,7 +561,7 @@ class WhisperWriterApp(QObject):
         # Starting a new recording explicitly abandons the previous failed audio.
         self.failed_recordings.clear()
         if model_name is None:
-            model_name = self._model_for_next_press()
+            model_name = self._selected_model()
         self._set_active_model(model_name)
         self._start_worker(ResultThread(self.local_model, model_name=model_name))
 
@@ -524,6 +597,8 @@ class WhisperWriterApp(QObject):
         """
         previous_status = self.current_status
         self.current_status = status
+        if status != 'recording' and getattr(self, '_model_hold_pending', False):
+            self._cancel_model_hold()
         if getattr(self, 'escape_guard', None):
             self.escape_guard.set_active(status == 'recording' and not self._shutdown_action)
 
@@ -540,6 +615,7 @@ class WhisperWriterApp(QObject):
             self.tray_icon.showMessage('WhisperWriter', message, QSystemTrayIcon.Warning, 5000)
 
     def on_worker_finished(self):
+        self._cancel_model_hold()
         thread = self.result_thread
         if self._retrying and thread and thread.transcription_succeeded:
             self.failed_recordings.pop(0)

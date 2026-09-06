@@ -126,7 +126,7 @@ WhisperWriter uses a configuration file to customize its behaviour. To set up th
 - `api`: Configuration options for the OpenAI API. See the [OpenAI API documentation](https://platform.openai.com/docs/api-reference/audio/create?lang=python) for more information.
   - `base_url`: The base URL for an OpenAI-compatible API. The Settings window can load models from its `/models` endpoint. (Default: `https://api.openai.com/v1`)
   - `model`: The primary transcription model. The Settings window provides an editable dropdown and Refresh button when the endpoint exposes available models; the last selected value remains selected after refresh and when Settings is reopened. (Default: `whisper-1`)
-  - `secondary_model`: Optional secondary model. With two models configured, activation presses alternate primary, secondary, primary, secondary. The active model is shown in the tray tooltip and status popup. (Default: `null`)
+  - `secondary_model`: Optional secondary model. While recording, hold the activation shortcut to alternate primary and secondary without stopping capture; release a short press to stop and transcribe with the selected model. The active model is shown in the tray tooltip and status popup. (Default: `null`)
   - `api_key`: Your API key for the OpenAI API. Required for non-local API usage. (Default: `null`)
 
 - `local`: Configuration options for the local Whisper model.

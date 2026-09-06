@@ -24,7 +24,7 @@ installed-package audit, not a guarantee that all vulnerabilities or hardware fa
 | Medium | HTTP clients were not explicitly closed; default SDK retries prolonged failures. | Close each client; disable automatic retries; add a 120-second configurable HTTP inactivity timeout. This is not a total request deadline. |
 | Medium | Local transcription interpreted non-16-kHz arrays as 16-kHz audio. | Reject incompatible local recording rates before opening the microphone. API WAV files retain the configured sample rate. |
 | Medium | There was no in-app way to discover and apply a newer commit. | The tray Update action now checks `origin/<current branch>` asynchronously, shows a dedicated updating icon while checking/applying, keeps the current-state dialog, and starts the existing fast-forward updater silently when a commit is available. |
-| Medium | API model selection was single-valued and refresh could move the selection to the first discovered model. | Settings now keeps separate primary/secondary selectors, preserves both selected values across discovery and reopen, and alternates the model used by successive activation presses. The active model is shown in the tray tooltip and status popup. |
+| Medium | API model selection was single-valued and refresh could move the selection to the first discovered model. | Settings now keeps separate primary/secondary selectors, preserves both selected values across discovery and reopen, and lets a held activation shortcut alternate the model without ending capture. The active model is shown in the tray tooltip and status popup. |
 
 Dependency audit evidence, with duplicate advisory IDs removed, is in
 [docs/dependency-audit-2026-09-06.json](docs/dependency-audit-2026-09-06.json).
@@ -116,7 +116,7 @@ Run `venv/bin/python -m unittest discover -s tests -v` from the checkout. Tests 
 keyboard input, offscreen Qt and synthetic audio; one test uses the real SDK against a
 loopback HTTP server. They never record the microphone or type into another application.
 
-The current suite has 41 headless regression tests, including real HTTP failure/retry using
+The current suite has 42 headless regression tests, including real HTTP failure/retry using
 identical WAV audio, retry failures, model-list discovery, model alternation and preservation
 of selected models. Seven isolated X11 checks also pass, covering suppression, existing desktop
 grabs, the real pynput observer, popup focus, Settings activation and Escape discarding Settings

@@ -32,8 +32,10 @@ pressing **Refresh** loads model IDs from the endpoint's OpenAI-compatible `/mod
 without blocking the window; if discovery is unavailable, the model can still be typed
 manually. The API settings include separate primary and optional secondary model selectors;
 the last selected value is preserved through refreshes and when Settings is reopened. With
-both configured, activation presses alternate primary, secondary, primary, secondary. The
-active model appears in the tray tooltip and the status popup while recording/transcribing.
+both configured, a short activation press stops recording and a held activation press
+(600 ms) alternates the model without stopping capture. Release a short press to transcribe
+with the selected model. The active model appears in the tray tooltip and the status popup
+while recording/transcribing.
 The common initial prompt is a separated multi-line editor with a clickable link to OpenAI's
 prompting guide.
 Requests are not retried automatically. Exit/settings restart waits for active worker work

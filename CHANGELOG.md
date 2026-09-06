@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - New main window to either start the keyboard listener or open the settings window.
 - New continuous recording mode ([Issue #40](https://github.com/savbell/whisper-writer/issues/40)).
 - New option to play a sound when transcription finishes ([Issue #40](https://github.com/savbell/whisper-writer/issues/40)).
-- Optional secondary API model selection; activation presses alternate between primary and secondary models.
+- Optional secondary API model selection; a held activation shortcut alternates between primary and secondary models without ending capture.
 
 ### Changed
 - Migrated status window from using `tkinter` to `PyQt5`.

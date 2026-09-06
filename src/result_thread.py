@@ -84,6 +84,9 @@ class ResultThread(QThread):
                 ConfigManager.console_print('Recording...')
                 logger.debug('Recording started')
                 audio_data = self._record_audio()
+                # Capture is over before transcription starts. Keep this state explicit so
+                # the GUI can distinguish a worker still recording from one already transcribing.
+                self.stop_recording()
             else:
                 audio_data = self.audio_data
 
