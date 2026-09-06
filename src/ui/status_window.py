@@ -30,7 +30,11 @@ class StatusWindow(BaseWindow):
         """
         Initialize the status user interface.
         """
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        # A passive indicator must stay visible when another application is active.
+        # Utility/Tool windows can be hidden by KWin with their inactive group.
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+                            | Qt.ToolTip | Qt.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
 
         status_layout = QHBoxLayout()
         status_layout.setContentsMargins(0, 0, 0, 0)
@@ -149,6 +153,7 @@ class StatusWindow(BaseWindow):
         x, y = positions.get(position, positions['bottom_right'])
         self.move(screen_geometry.x() + x, screen_geometry.y() + y)
         super().show()
+        self.raise_()
 
     def closeEvent(self, event):
         """
@@ -176,6 +181,7 @@ class StatusWindow(BaseWindow):
             self._startPulse(self.pencil_pixmap, period=1.4)
             self.border_color = self.transcribing_border_color
             self.update()
+            self.show()
 
         if status in ('idle', 'error', 'cancel'):
             self._stopPulse()

@@ -32,8 +32,9 @@ class ResultThread(QThread):
 
     statusSignal = pyqtSignal(str)
     resultSignal = pyqtSignal(str)
+    failedAudioSignal = pyqtSignal(object)
 
-    def __init__(self, local_model=None):
+    def __init__(self, local_model=None, audio_data=None, sample_rate=None):
         """
         Initialize the ResultThread.
 
@@ -41,10 +42,13 @@ class ResultThread(QThread):
         """
         super().__init__()
         self.local_model = local_model
-        self.is_recording = True
+        self.audio_data = audio_data
+        self.transcription_succeeded = False
+        self.transcription_failed = False
+        self.is_recording = audio_data is None
         self.is_running = True
         self.is_cancelled = False
-        self.sample_rate = None
+        self.sample_rate = sample_rate
         self.mutex = QMutex()
 
     def stop_recording(self):
@@ -69,14 +73,18 @@ class ResultThread(QThread):
 
     def run(self):
         """Main execution method for the thread."""
+        audio_data = None
         try:
             if not self.is_running:
                 return
 
-            self.statusSignal.emit('recording')
-            ConfigManager.console_print('Recording...')
-            logger.debug('Recording started')
-            audio_data = self._record_audio()
+            if self.audio_data is None:
+                self.statusSignal.emit('recording')
+                ConfigManager.console_print('Recording...')
+                logger.debug('Recording started')
+                audio_data = self._record_audio()
+            else:
+                audio_data = self.audio_data
 
             if not self.is_running:
                 return
@@ -97,7 +105,7 @@ class ResultThread(QThread):
 
             # Time the transcription process
             start_time = time.time()
-            result = transcribe(audio_data, self.local_model)
+            result = transcribe(audio_data, self.local_model, sample_rate=self.sample_rate)
             end_time = time.time()
 
             transcription_time = end_time - start_time
@@ -108,9 +116,13 @@ class ResultThread(QThread):
                 return
 
             self.statusSignal.emit('idle')
+            self.transcription_succeeded = True
             self.resultSignal.emit(result)
 
         except Exception:
+            if audio_data is not None and self.is_running:
+                self.transcription_failed = True
+                self.failedAudioSignal.emit((audio_data, self.sample_rate))
             traceback.print_exc()
             self.statusSignal.emit('error')
 

@@ -34,6 +34,13 @@ class SettingsWindow(BaseWindow):
         self.init_settings_ui()
         self.baseline_values = self.collect_current_values()
 
+    def show_and_activate(self):
+        """Restore and focus Settings after an explicit tray-menu request."""
+        self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
     def init_settings_ui(self):
         """Initialize the settings user interface."""
         self.tabs = QTabWidget()

@@ -7,8 +7,8 @@ this fork, `upstream` is the original (unmaintained since Aug 2024) project.
 ## Current maintenance notes (2026-09-06)
 
 See [REVIEW.md](REVIEW.md) for fixed critical issues, verification, dependency audit and
-remaining topics. Recording during transcription and suppressing Escape in the focused
-application are planned there; neither is enabled by this update.
+remaining topics. Recording during transcription is still planned. Escape suppression
+on X11 is implemented in the follow-up below.
 
 On each other computer, finish dictation and run `./update.sh`. A plain `git pull` updates
 code only: follow it with `venv/bin/python3 -m pip install -r requirements.txt` and
@@ -24,6 +24,60 @@ without blocking Qt; a native model call still has to finish. Complete dictation
 external process restart/update, which terminates in-flight work.
 
 Earlier dated sections below describe the history and may show superseded behavior.
+
+## Retry failed transcription (2026-09-06)
+
+A failed transcription retains its audio in memory. The tray shows a **red octagon with
+an exclamation mark**, distinct from the red recording microphone, and its menu enables
+**Retry Transcription** after the worker finishes. Retry sends the oldest failed recording
+again without opening the microphone and preserves its original sample rate. A successful
+retry types its result normally and removes that recording; a failed retry retains it.
+The error icon returns after any active recording/transcription while failures remain.
+
+**Discard Failed Recording** removes the oldest failed item. Multiple failures are kept
+in order (the retry menu shows a count). At five pending failures, new capture is blocked
+until one is retried successfully or discarded, so old audio is never silently replaced.
+Retry and discard are disabled during recording/transcription. Continuous mode stops on
+failure; retry does not automatically restart continuous recording.
+
+Audio is **not written to disk** and does not survive exit, settings restart, process
+restart, update or a crash. Copy Last Transcript still holds the latest nonempty text.
+A capture/device failure without complete audio cannot be retried; record again instead.
+
+## Escape suppression and window visibility follow-up (2026-09-06)
+
+Escape now cancels the active recording and is consumed on X11, so it does not also
+close a dialog or change mode in the focused application. `src/escape_guard.py` owns a
+separate X connection integrated with Qt's socket notifier. It grabs only Escape,
+including modifier combinations, while recording. Removing the passive grab leaves an
+already held Escape captured through its release. Idle/transcribing Escape behaves
+normally; cancelling an in-flight transcription is not implemented. Connection cleanup
+releases grabs on exit or suspend. Suspending also stops the current recording/session.
+Existing desktop Escape shortcuts keep their modifier combinations; those combinations
+remain unsuppressed. On Wayland or if another client owns every Escape combination,
+ordinary unsuppressed cancellation remains available (a complete grab conflict is logged).
+The existing pynput/XRecord or evdev listener still triggers cancellation; the X11 grab
+only prevents delivery to the focused window.
+
+The popup now uses a non-activating tooltip-type window instead of a utility window, so
+it can remain visible independently of Settings and application focus. Both recording
+and transcription explicitly show and raise it at the configured position. The reported
+missing popup was intermittent (it returned before this patch); its original cause was
+not conclusively reproduced. Opening Settings from the tray now restores, raises and
+activates it after the menu closes.
+
+X11 regression checks run on an **isolated** Xvfb display; they inject keys only into
+their own test window:
+
+```bash
+xvfb-run -a env QT_QPA_PLATFORM=xcb XDG_SESSION_TYPE=x11 WW_ISOLATED_X11_TEST=1 \
+  venv/bin/python tests/x11_checks.py
+```
+
+Do not set that test flag on your normal desktop display. The checks cover Escape
+press/release suppression, idle pass-through, other keys, repeated recordings, conflicting
+grabs, popup visibility/focus and restoring Settings. The regular headless tests remain
+`venv/bin/python -m unittest discover -s tests -v`.
 
 ## Why this fork exists
 

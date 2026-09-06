@@ -36,8 +36,13 @@ class ReliabilityTests(unittest.TestCase):
     def app(self):
         app = WhisperWriterApp.__new__(WhisperWriterApp)
         QObject.__init__(app)
+        app.failed_recordings = []
+        app._retrying = False
+        app.retry_transcript_action = Mock()
+        app.discard_failed_action = Mock()
         app._shutdown_action = None
         app._continue_recording = False
+        app.local_model = None
         app.result_thread = None
         app.current_status = 'idle'
         app.key_listener = Mock()
@@ -55,7 +60,7 @@ class ReliabilityTests(unittest.TestCase):
     def test_stop_does_not_wait_for_transcription(self):
         entered, release = threading.Event(), threading.Event()
         worker = ResultThread()
-        with patch.object(worker, '_record_audio', return_value=np.ones(1600, dtype=np.int16)), patch('result_thread.transcribe', side_effect=lambda *a: (entered.set(), release.wait(3), 'text')[-1]):
+        with patch.object(worker, '_record_audio', return_value=np.ones(1600, dtype=np.int16)), patch('result_thread.transcribe', side_effect=lambda *a, **kw: (entered.set(), release.wait(3), 'text')[-1]):
             worker.start()
             self.assertTrue(entered.wait(2))
             before = time.monotonic()
@@ -177,6 +182,77 @@ class ReliabilityTests(unittest.TestCase):
             self.assertEqual(path.read_text(), 'old contents')
             self.assertEqual(len(list(Path(tmp).iterdir())), 1)
 
+    def test_failed_transcription_retains_audio_and_original_rate(self):
+        data = np.ones(1600, dtype=np.int16)
+        worker = ResultThread(audio_data=data, sample_rate=8000)
+        failures = []
+        worker.failedAudioSignal.connect(failures.append)
+        with patch('result_thread.transcribe', side_effect=RuntimeError('network down')), patch('result_thread.traceback.print_exc'), patch.object(worker, '_record_audio') as record:
+            worker.run()
+        record.assert_not_called()
+        self.assertEqual(len(failures), 1)
+        self.assertIs(failures[0][0], data)
+        self.assertEqual(failures[0][1], 8000)
+        self.assertFalse(worker.transcription_succeeded)
+
+    def test_retry_uses_saved_audio_without_microphone(self):
+        app = self.app()
+        data = np.ones(1600, dtype=np.int16)
+        app.failed_recordings = [(data, 8000)]
+        with patch.object(app, '_start_worker') as start:
+            app.retry_transcription()
+        worker = start.call_args.args[0]
+        self.assertIs(worker.audio_data, data)
+        self.assertEqual(worker.sample_rate, 8000)
+        with patch.object(worker, '_record_audio') as record, patch('result_thread.transcribe', return_value='recovered') as transcribe:
+            worker.run()
+        record.assert_not_called()
+        self.assertEqual(transcribe.call_args.kwargs['sample_rate'], 8000)
+        self.assertTrue(worker.transcription_succeeded)
+
+    def test_failed_retry_does_not_duplicate_recording(self):
+        app = self.app()
+        data = (np.ones(1600), 16000)
+        app.failed_recordings = [data]
+        app._retrying = True
+        app.on_transcription_failed(data)
+        self.assertEqual(len(app.failed_recordings), 1)
+
+    def test_successful_retry_removes_only_oldest_failed_recording(self):
+        app = self.app()
+        oldest, newer = (np.ones(1600), 16000), (np.ones(3200), 16000)
+        app.failed_recordings = [oldest, newer]
+        app._retrying = True
+        app.result_thread = Mock(transcription_succeeded=True)
+        with patch.object(app, 'update_tray_icon'):
+            app.on_worker_finished()
+        self.assertEqual(len(app.failed_recordings), 1)
+        self.assertIs(app.failed_recordings[0], newer)
+        app.retry_transcript_action.setEnabled.assert_called_with(True)
+
+    def test_error_icon_survives_worker_idle(self):
+        app = self.app()
+        app.tray_icon_error = object()
+        app.failed_recordings = [(np.ones(1600), 16000)]
+        app.update_tray_icon('idle')
+        app.tray_icon.setIcon.assert_called_with(app.tray_icon_error)
+        self.assertIn('1 to retry', app.tray_icon.setToolTip.call_args.args[0])
+
+    def test_full_failure_queue_prevents_silent_audio_loss(self):
+        app = self.app()
+        app.failed_recordings = [(np.ones(1600), 16000)] * 5
+        with patch.object(app, '_start_worker') as start:
+            app.start_result_thread()
+        start.assert_not_called()
+        app.tray_icon.showMessage.assert_called_once()
+
+    def test_discard_removes_only_oldest_failure(self):
+        app = self.app()
+        app.failed_recordings = [('first', 16000), ('second', 16000)]
+        with patch.object(app, 'update_tray_icon'):
+            app.discard_failed_recording()
+        self.assertEqual(app.failed_recordings, [('second', 16000)])
+
     def test_dotool_rejects_command_injection(self):
         simulator = InputSimulator.__new__(InputSimulator)
         simulator.dotool_process = Mock()
@@ -212,6 +288,50 @@ class ReliabilityTests(unittest.TestCase):
                 self.assertEqual(transcription.transcribe_api(np.zeros(1600, dtype=np.int16)), 'tested')
             self.assertEqual(len(calls), 1)
             self.assertIn(b'audio.wav', calls[0])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_real_http_failure_can_retry_identical_audio(self):
+        calls = []
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                calls.append(self.rfile.read(int(self.headers['Content-Length'])))
+                body = b'{"error": {"message": "offline", "type": "server_error"}}' if len(calls) == 1 else b'{"text": "recovered"}'
+                self.send_response(503 if len(calls) == 1 else 200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *args):
+                pass
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            ConfigManager.set_config_value(True, 'model_options', 'use_api')
+            ConfigManager.set_config_value(f'http://127.0.0.1:{server.server_port}/v1', 'model_options', 'api', 'base_url')
+            data = np.arange(1600, dtype=np.int16)
+            first = ResultThread(audio_data=data, sample_rate=8000)
+            failures, results = [], []
+            first.failedAudioSignal.connect(failures.append)
+            with patch.dict(os.environ, {'OPENAI_API_KEY': 'test'}), patch('result_thread.traceback.print_exc'):
+                first.run()
+                self.assertEqual(len(calls), 1)  # No implicit SDK retries.
+                second = ResultThread(audio_data=failures[0][0], sample_rate=failures[0][1])
+                second.resultSignal.connect(results.append)
+                second.run()
+            self.assertTrue(second.transcription_succeeded)
+            self.assertEqual(results, ['recovered '])
+            self.assertEqual(len(calls), 2)
+            # Compare WAV data, ignoring randomized multipart boundaries.
+            wavs = [body[body.index(b'RIFF'):].split(b'\r\n--')[0] for body in calls]
+            self.assertEqual(wavs[0], wavs[1])
+            import io, wave
+            with wave.open(io.BytesIO(wavs[1])) as audio:
+                self.assertEqual(audio.getframerate(), 8000)
+                self.assertEqual(audio.readframes(1600), data.tobytes())
         finally:
             server.shutdown()
             server.server_close()

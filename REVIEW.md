@@ -48,12 +48,11 @@ Advisory counts describe installed versions, not demonstrated exploitability thr
      hold-to-record release, full queue and shutdown with both workers active.
    This is a moderate architectural change, so it is deliberately separate from these repairs.
 
-2. **Escape is caught but still reaches the focused application.** Current cancellation
-   discards the active recording; it does not cancel an already running transcription.
-   Suppression remains deferred. The existing X11 plan is in FORK_NOTES.md. Implement an
-   opt-in recording-scoped Escape grab with balanced press/release handling and cleanup on
-   error, cancellation, shutdown and suspend. Verify conflicts with desktop shortcuts and
-   modal dialogs. Backend-specific tests are necessary; global suppression is unsuitable.
+2. **Escape suppression — implemented in the follow-up.** On X11, a recording-scoped
+   Escape grab now consumes the key and its release, with cleanup on completion and
+   suspend/shutdown. Idle and transcription leave Escape alone. Unsupported sessions or
+   grab conflicts fall back to unsuppressed cancellation. See FORK_NOTES.md for behavior
+   and isolated X11 checks. Recording during transcription remains deferred.
 
 3. **One remaining dependency advisory:** setuptools is capped below 81 because the installed
    `webrtcvad-wheels` imports `pkg_resources`, removed in newer setuptools. The audit reports
@@ -64,11 +63,14 @@ Advisory counts describe installed versions, not demonstrated exploitability thr
    Replace/update the VAD dependency and test all VAD modes before lifting the cap. The raw
    audit lists this same advisory twice; it is one distinct advisory.
 
-4. **Audio recovery and limits.** Failed network requests currently discard the recording.
-   Consider private, expiring WAV storage with explicit retry/delete controls. Add a maximum
-   recording duration and a no-callback deadline for disconnected devices that still report
-   active. PCM storage is smaller now, but total recording duration is still unbounded.
-   Persistent audio needs a deliberate retention policy.
+4. **Audio recovery — retry implemented; persistence and duration limits remain open.**
+   Failed transcriptions now retain audio in memory, with Retry Transcription and Discard
+   Failed Recording tray actions, a distinct persistent error icon and an ordered queue
+   limited to five failed recordings. Retry preserves the original sample rate. Failed
+   retries do not duplicate or discard audio. Audio does not survive application exit,
+   restart or crash; persistent recovery would need private storage and a retention policy.
+   Add a maximum recording duration and a no-callback deadline for disconnected devices
+   that still report active. Individual recording duration is still unbounded.
 
 5. **Deployment consistency and failure recovery.** `update.sh` fast-forwards before installing
    dependencies. A failed install can therefore leave newer code with an incomplete environment;
@@ -97,3 +99,9 @@ consistency, dependency audit before/after, and offscreen full application start
 with hardware adapters mocked. The desktop application was restarted after these checks and remained running; its
 startup log contained only the known VAD/setuptools deprecation warning. Real microphone dictation, NAS transcription, GPU inference, suspend/resume and
 operation on the other computers still need normal use validation.
+
+
+Follow-up verification: all 26 headless regression tests passed, including real HTTP failure and
+retry using identical WAV audio, FIFO retention, retry failures and the pending-audio limit.
+Six isolated X11 checks passed both with bare Xvfb and with KDE KWin, covering suppression,
+existing desktop grabs, the real pynput observer, popup focus and Settings activation.

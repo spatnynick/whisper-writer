@@ -53,6 +53,7 @@ PyRect==0.2.0
 pyscreenshot==3.1
 PyScreeze==0.1.29
 python-dotenv==1.2.2
+python-xlib==0.33; sys_platform == "linux"
 pytweening==1.0.7
 PyYAML==6.0.1
 rapidfuzz==3.14.6

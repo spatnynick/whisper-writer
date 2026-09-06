@@ -8,6 +8,7 @@ from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QAction, QMessageBox, QStyle
 
 from key_listener import KeyListener
+from escape_guard import EscapeGuard
 from result_thread import ResultThread
 from ui.settings_window import SettingsWindow
 from ui.status_window import StatusWindow
@@ -36,6 +37,8 @@ class WhisperWriterApp(QObject):
         # by default it counts as "the last window". The tray icon should control lifetime.
         self.app.setQuitOnLastWindowClosed(False)
 
+        self.failed_recordings = []
+        self._retrying = False
         self._shutdown_action = None
         self._continue_recording = False
         self.activationRequested.connect(self.on_activation, Qt.QueuedConnection)
@@ -82,6 +85,10 @@ class WhisperWriterApp(QObject):
     def on_prepare_for_sleep(self, going_to_sleep: bool):
         """Called by logind before suspend (True) and again after resume (False)."""
         if going_to_sleep:
+            if getattr(self, 'escape_guard', None):
+                self.escape_guard.close()
+            if getattr(self, 'result_thread', None):
+                self.stop_result_thread()
             return
         QTimer.singleShot(2000, self._restart_key_listener_after_resume)
 
@@ -96,6 +103,7 @@ class WhisperWriterApp(QObject):
         """
         Initialize the components of the application.
         """
+        self.escape_guard = EscapeGuard(self)
         self.input_simulator = InputSimulator()
 
         self.key_listener = KeyListener()
@@ -140,6 +148,7 @@ class WhisperWriterApp(QObject):
         self.tray_icon_idle = QIcon(os.path.join('assets', 'ww-logo.png'))
         self.tray_icon_recording = QIcon(os.path.join('assets', 'ww-logo-recording.png'))
         self.tray_icon_transcribing = QIcon(os.path.join('assets', 'ww-logo-transcribing.png'))
+        self.tray_icon_error = QIcon(os.path.join('assets', 'ww-logo-error.svg'))
 
         self.tray_icon = QSystemTrayIcon(self.tray_icon_idle, self.app)
         self.tray_icon.setToolTip('WhisperWriter — Idle')
@@ -147,7 +156,7 @@ class WhisperWriterApp(QObject):
         tray_menu = QMenu()
 
         settings_action = QAction(self.app.style().standardIcon(QStyle.SP_FileDialogDetailedView), 'Open Settings', self.app)
-        settings_action.triggered.connect(self.settings_window.show)
+        settings_action.triggered.connect(self.open_settings)
         tray_menu.addAction(settings_action)
 
         tray_menu.addSeparator()
@@ -156,6 +165,14 @@ class WhisperWriterApp(QObject):
         self.copy_last_transcript_action.setEnabled(False)
         self.copy_last_transcript_action.triggered.connect(self.copy_last_transcript)
         tray_menu.addAction(self.copy_last_transcript_action)
+
+        self.retry_transcript_action = QAction('Retry Transcription', self.app)
+        self.retry_transcript_action.triggered.connect(self.retry_transcription)
+        tray_menu.addAction(self.retry_transcript_action)
+        self.discard_failed_action = QAction('Discard Failed Recording', self.app)
+        self.discard_failed_action.triggered.connect(self.discard_failed_recording)
+        tray_menu.addAction(self.discard_failed_action)
+        self._update_retry_actions()
 
         tray_menu.addSeparator()
 
@@ -166,12 +183,20 @@ class WhisperWriterApp(QObject):
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.show()
 
+    def open_settings(self):
+        # Wait until the tray menu releases its popup grab before requesting focus.
+        QTimer.singleShot(0, self.settings_window.show_and_activate)
+
     def update_tray_icon(self, status):
         """
         Update the system tray icon to reflect the current recording/transcribing status,
         if enabled via the misc.show_tray_status_icon setting.
         """
-        if not ConfigManager.get_config_value('misc', 'show_tray_status_icon'):
+        if status in ('idle', 'error', 'cancel') and self.failed_recordings:
+            status = 'error'
+        if status != 'error' and not ConfigManager.get_config_value('misc', 'show_tray_status_icon'):
+            self.tray_icon.setIcon(self.tray_icon_idle)
+            self.tray_icon.setToolTip('WhisperWriter')
             return
 
         if status == 'recording':
@@ -180,9 +205,42 @@ class WhisperWriterApp(QObject):
         elif status == 'transcribing':
             self.tray_icon.setIcon(self.tray_icon_transcribing)
             self.tray_icon.setToolTip('WhisperWriter — Transcribing...')
-        elif status in ('idle', 'error', 'cancel'):
+        elif status == 'error':
+            self.tray_icon.setIcon(self.tray_icon_error)
+            suffix = f' — {len(self.failed_recordings)} to retry' if self.failed_recordings else ''
+            self.tray_icon.setToolTip(f'WhisperWriter — Error{suffix}')
+        elif status in ('idle', 'cancel'):
             self.tray_icon.setIcon(self.tray_icon_idle)
             self.tray_icon.setToolTip('WhisperWriter — Idle')
+
+    def _update_retry_actions(self):
+        count = len(self.failed_recordings)
+        available = bool(count) and self.result_thread is None and not self._shutdown_action
+        self.retry_transcript_action.setEnabled(available)
+        suffix = f' ({count} pending)' if count > 1 else ''
+        self.retry_transcript_action.setText('Retry Transcription' + suffix)
+        self.discard_failed_action.setEnabled(available)
+
+    def on_transcription_failed(self, recording):
+        # A failed retry retains the original entry rather than duplicating it.
+        if not self._retrying:
+            self.failed_recordings.append(recording)
+        self._update_retry_actions()
+
+    def retry_transcription(self):
+        if not self.failed_recordings or self.result_thread is not None or self._shutdown_action:
+            return
+        audio_data, sample_rate = self.failed_recordings[0]
+        self._retrying = True
+        self._continue_recording = False
+        self._start_worker(ResultThread(self.local_model, audio_data=audio_data, sample_rate=sample_rate))
+
+    def discard_failed_recording(self):
+        if self.result_thread is not None or not self.failed_recordings:
+            return
+        self.failed_recordings.pop(0)
+        self._update_retry_actions()
+        self.update_tray_icon('idle')
 
     def copy_last_transcript(self):
         """
@@ -202,6 +260,8 @@ class WhisperWriterApp(QObject):
         )
 
     def cleanup(self):
+        if getattr(self, 'escape_guard', None):
+            self.escape_guard.close()
         if getattr(self, 'key_listener', None):
             self.key_listener.stop()
         if getattr(self, 'input_simulator', None):
@@ -215,6 +275,8 @@ class WhisperWriterApp(QObject):
 
     def _request_shutdown(self, action):
         # Keep Qt and the QThread alive until the worker has released its resources.
+        if getattr(self, 'escape_guard', None):
+            self.escape_guard.set_active(False)
         self._shutdown_action = action
         self._continue_recording = False
         if getattr(self, 'key_listener', None):
@@ -284,12 +346,21 @@ class WhisperWriterApp(QObject):
         if self._shutdown_action or self.result_thread is not None:
             return
 
-        self.result_thread = ResultThread(self.local_model)
+        if len(self.failed_recordings) >= 5:
+            self._continue_recording = False
+            self.tray_icon.showMessage('WhisperWriter', 'Five failed recordings are waiting. Retry or discard one from the tray before recording again.', QSystemTrayIcon.Warning, 5000)
+            return
+        self._start_worker(ResultThread(self.local_model))
+
+    def _start_worker(self, worker):
+        self.result_thread = worker
+        self._update_retry_actions()
         if not ConfigManager.get_config_value('misc', 'hide_status_window'):
             self.result_thread.statusSignal.connect(self.status_window.updateStatus)
         self.result_thread.statusSignal.connect(self.update_tray_icon)
         self.result_thread.statusSignal.connect(self.on_status_changed)
         self.result_thread.resultSignal.connect(self.on_transcription_complete)
+        self.result_thread.failedAudioSignal.connect(self.on_transcription_failed)
         self.result_thread.finished.connect(self.on_worker_finished)
         self.result_thread.start()
 
@@ -310,6 +381,8 @@ class WhisperWriterApp(QObject):
         """
         previous_status = self.current_status
         self.current_status = status
+        if getattr(self, 'escape_guard', None):
+            self.escape_guard.set_active(status == 'recording' and not self._shutdown_action)
 
         if ConfigManager.get_config_value('misc', 'play_toggle_sounds'):
             if status == 'recording' and previous_status != 'recording':
@@ -319,11 +392,17 @@ class WhisperWriterApp(QObject):
 
         if status == 'error':
             self._continue_recording = False
-            self.tray_icon.showMessage('WhisperWriter', 'Recording or transcription failed. See the application log; please retry.', QSystemTrayIcon.Warning, 5000)
+            message = ('Transcription failed. Use Retry Transcription in the tray menu. Audio is retained until exit/restart.'
+                       if self.result_thread and self.result_thread.transcription_failed else 'Recording failed. See the application log; please try recording again.')
+            self.tray_icon.showMessage('WhisperWriter', message, QSystemTrayIcon.Warning, 5000)
 
     def on_worker_finished(self):
         thread = self.result_thread
+        if self._retrying and thread and thread.transcription_succeeded:
+            self.failed_recordings.pop(0)
+        self._retrying = False
         self.result_thread = None
+        self._update_retry_actions()
         if thread:
             thread.deleteLater()
         if self._shutdown_action:

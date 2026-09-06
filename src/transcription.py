@@ -50,10 +50,12 @@ def create_local_model():
     ConfigManager.console_print('Local model created.')
     return model
 
-def transcribe_local(audio_data, local_model=None):
+def transcribe_local(audio_data, local_model=None, sample_rate=None):
     """
     Transcribe an audio file using a local model.
     """
+    if sample_rate is not None and sample_rate != 16000:
+        raise ValueError('Local transcription requires 16000 Hz audio.')
     if not local_model:
         local_model = create_local_model()
     model_options = ConfigManager.get_config_section('model_options')
@@ -69,7 +71,7 @@ def transcribe_local(audio_data, local_model=None):
                                       vad_filter=model_options['local']['vad_filter'],)
     return ''.join([segment.text for segment in list(response[0])])
 
-def transcribe_api(audio_data):
+def transcribe_api(audio_data, sample_rate=None):
     """
     Transcribe an audio file using the OpenAI API.
     """
@@ -81,7 +83,7 @@ def transcribe_api(audio_data):
 
     # Convert numpy array to WAV file
     byte_io = io.BytesIO()
-    sample_rate = ConfigManager.get_config_section('recording_options').get('sample_rate') or 16000
+    sample_rate = sample_rate or ConfigManager.get_config_section('recording_options').get('sample_rate') or 16000
     sf.write(byte_io, audio_data, sample_rate, format='wav')
     byte_io.seek(0)
 
@@ -115,7 +117,7 @@ def post_process_transcription(transcription):
 
     return transcription
 
-def transcribe(audio_data, local_model=None):
+def transcribe(audio_data, local_model=None, sample_rate=None):
     """
     Transcribe audio date using the OpenAI API or a local model, depending on config.
     """
@@ -123,9 +125,9 @@ def transcribe(audio_data, local_model=None):
         return ''
 
     if ConfigManager.get_config_value('model_options', 'use_api'):
-        transcription = transcribe_api(audio_data)
+        transcription = transcribe_api(audio_data, sample_rate=sample_rate)
     else:
-        transcription = transcribe_local(audio_data, local_model)
+        transcription = transcribe_local(audio_data, local_model, sample_rate=sample_rate)
 
     return post_process_transcription(transcription)
 
