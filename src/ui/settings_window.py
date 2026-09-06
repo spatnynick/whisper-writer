@@ -4,10 +4,10 @@ import sys
 from dotenv import set_key, load_dotenv
 from PyQt5.QtWidgets import (
     QApplication, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox,
-    QMessageBox, QTabWidget, QWidget, QSizePolicy, QSpacerItem, QToolButton, QStyle, QFileDialog
+    QMessageBox, QShortcut, QTabWidget, QWidget, QSizePolicy, QSpacerItem, QToolButton, QStyle, QFileDialog
 )
 from PyQt5.QtCore import Qt, QCoreApplication, QProcess, pyqtSignal
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QIcon, QKeySequence
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from ui.base_window import BaseWindow
@@ -33,6 +33,14 @@ class SettingsWindow(BaseWindow):
         self.allow_live_reload = False
         self.init_settings_ui()
         self.baseline_values = self.collect_current_values()
+        self.escape_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        self.escape_shortcut.setContext(Qt.WindowShortcut)
+        self.escape_shortcut.activated.connect(self.discard_and_close)
+
+    def discard_and_close(self):
+        """Escape discards edits without saving or restarting the tray application."""
+        self.reset_settings()
+        self.close()
 
     def show_and_activate(self):
         """Restore and focus Settings after an explicit tray-menu request."""

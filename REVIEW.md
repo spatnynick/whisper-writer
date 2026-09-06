@@ -64,11 +64,11 @@ Advisory counts describe installed versions, not demonstrated exploitability thr
    audit lists this same advisory twice; it is one distinct advisory.
 
 4. **Audio recovery — retry implemented; persistence and duration limits remain open.**
-   Failed transcriptions now retain audio in memory, with Retry Transcription and Discard
-   Failed Recording tray actions, a distinct persistent error icon and an ordered queue
-   limited to five failed recordings. Retry preserves the original sample rate. Failed
-   retries do not duplicate or discard audio. Audio does not survive application exit,
-   restart or crash; persistent recovery would need private storage and a retention policy.
+   Failed transcriptions retain audio in memory, with a Retry Transcription tray action
+   and a distinct persistent error icon. Starting the next recording discards the failed
+   audio. Retry preserves the original sample rate; a failed retry retains that audio.
+   Audio does not survive application exit, restart or crash; persistent recovery would
+   need private storage and a retention policy.
    Add a maximum recording duration and a no-callback deadline for disconnected devices
    that still report active. Individual recording duration is still unbounded.
 
@@ -101,7 +101,7 @@ startup log contained only the known VAD/setuptools deprecation warning. Real mi
 operation on the other computers still need normal use validation.
 
 
-Follow-up verification: all 26 headless regression tests passed, including real HTTP failure and
-retry using identical WAV audio, FIFO retention, retry failures and the pending-audio limit.
-Six isolated X11 checks passed both with bare Xvfb and with KDE KWin, covering suppression,
-existing desktop grabs, the real pynput observer, popup focus and Settings activation.
+Follow-up verification: all 27 headless regression tests passed, including real HTTP failure and
+retry using identical WAV audio, retry failures and discarding failed audio on the next recording.
+Seven isolated X11 checks passed both with bare Xvfb and with KDE KWin, covering suppression,
+existing desktop grabs, the real pynput observer, popup focus, Settings activation and Escape discarding Settings edits without quitting.

@@ -166,12 +166,9 @@ class WhisperWriterApp(QObject):
         self.copy_last_transcript_action.triggered.connect(self.copy_last_transcript)
         tray_menu.addAction(self.copy_last_transcript_action)
 
-        self.retry_transcript_action = QAction('Retry Transcription', self.app)
+        self.retry_transcript_action = QAction(self.app.style().standardIcon(QStyle.SP_BrowserReload), 'Retry Transcription', self.app)
         self.retry_transcript_action.triggered.connect(self.retry_transcription)
         tray_menu.addAction(self.retry_transcript_action)
-        self.discard_failed_action = QAction('Discard Failed Recording', self.app)
-        self.discard_failed_action.triggered.connect(self.discard_failed_recording)
-        tray_menu.addAction(self.discard_failed_action)
         self._update_retry_actions()
 
         tray_menu.addSeparator()
@@ -207,7 +204,7 @@ class WhisperWriterApp(QObject):
             self.tray_icon.setToolTip('WhisperWriter — Transcribing...')
         elif status == 'error':
             self.tray_icon.setIcon(self.tray_icon_error)
-            suffix = f' — {len(self.failed_recordings)} to retry' if self.failed_recordings else ''
+            suffix = ' — retry available' if self.failed_recordings else ''
             self.tray_icon.setToolTip(f'WhisperWriter — Error{suffix}')
         elif status in ('idle', 'cancel'):
             self.tray_icon.setIcon(self.tray_icon_idle)
@@ -217,14 +214,11 @@ class WhisperWriterApp(QObject):
         count = len(self.failed_recordings)
         available = bool(count) and self.result_thread is None and not self._shutdown_action
         self.retry_transcript_action.setEnabled(available)
-        suffix = f' ({count} pending)' if count > 1 else ''
-        self.retry_transcript_action.setText('Retry Transcription' + suffix)
-        self.discard_failed_action.setEnabled(available)
 
     def on_transcription_failed(self, recording):
         # A failed retry retains the original entry rather than duplicating it.
         if not self._retrying:
-            self.failed_recordings.append(recording)
+            self.failed_recordings[:] = [recording]
         self._update_retry_actions()
 
     def retry_transcription(self):
@@ -234,13 +228,6 @@ class WhisperWriterApp(QObject):
         self._retrying = True
         self._continue_recording = False
         self._start_worker(ResultThread(self.local_model, audio_data=audio_data, sample_rate=sample_rate))
-
-    def discard_failed_recording(self):
-        if self.result_thread is not None or not self.failed_recordings:
-            return
-        self.failed_recordings.pop(0)
-        self._update_retry_actions()
-        self.update_tray_icon('idle')
 
     def copy_last_transcript(self):
         """
@@ -346,10 +333,8 @@ class WhisperWriterApp(QObject):
         if self._shutdown_action or self.result_thread is not None:
             return
 
-        if len(self.failed_recordings) >= 5:
-            self._continue_recording = False
-            self.tray_icon.showMessage('WhisperWriter', 'Five failed recordings are waiting. Retry or discard one from the tray before recording again.', QSystemTrayIcon.Warning, 5000)
-            return
+        # Starting a new recording explicitly abandons the previous failed audio.
+        self.failed_recordings.clear()
         self._start_worker(ResultThread(self.local_model))
 
     def _start_worker(self, worker):
@@ -392,7 +377,7 @@ class WhisperWriterApp(QObject):
 
         if status == 'error':
             self._continue_recording = False
-            message = ('Transcription failed. Use Retry Transcription in the tray menu. Audio is retained until exit/restart.'
+            message = ('Transcription failed. Use Retry Transcription in the tray menu. Audio is retained until the next recording or exit/restart.'
                        if self.result_thread and self.result_thread.transcription_failed else 'Recording failed. See the application log; please try recording again.')
             self.tray_icon.showMessage('WhisperWriter', message, QSystemTrayIcon.Warning, 5000)
 
@@ -420,6 +405,9 @@ class WhisperWriterApp(QObject):
         Called on every ESC press; only actually cancels if a recording is currently
         in progress (not while transcribing, not while idle).
         """
+        if getattr(self, 'settings_window', None) and self.settings_window.isActiveWindow():
+            self.settings_window.discard_and_close()
+            return
         if self.result_thread and self.result_thread.isRunning() and self.current_status == 'recording':
             self.result_thread.cancel_recording()
 

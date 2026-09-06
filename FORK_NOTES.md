@@ -29,20 +29,23 @@ Earlier dated sections below describe the history and may show superseded behavi
 
 A failed transcription retains its audio in memory. The tray shows a **red octagon with
 an exclamation mark**, distinct from the red recording microphone, and its menu enables
-**Retry Transcription** after the worker finishes. Retry sends the oldest failed recording
-again without opening the microphone and preserves its original sample rate. A successful
-retry types its result normally and removes that recording; a failed retry retains it.
-The error icon returns after any active recording/transcription while failures remain.
+**Retry Transcription** with a refresh icon after the worker finishes. Retry sends the
+failed recording again without opening the microphone and preserves its original sample
+rate. A successful retry types its result normally and clears the error; a failed retry
+retains the same audio.
 
-**Discard Failed Recording** removes the oldest failed item. Multiple failures are kept
-in order (the retry menu shows a count). At five pending failures, new capture is blocked
-until one is retried successfully or discarded, so old audio is never silently replaced.
-Retry and discard are disabled during recording/transcription. Continuous mode stops on
-failure; retry does not automatically restart continuous recording.
+Starting the next recording discards the previous failed audio, as requested. There is
+no discard menu item or pending-recording queue. Retry is disabled while recording or
+transcribing. Continuous mode stops on failure; retry does not restart continuous recording.
 
-Audio is **not written to disk** and does not survive exit, settings restart, process
-restart, update or a crash. Copy Last Transcript still holds the latest nonempty text.
-A capture/device failure without complete audio cannot be retried; record again instead.
+Audio is **not written to disk** and does not survive the next recording, exit, settings
+restart, process restart, update or a crash. Copy Last Transcript still holds the latest
+nonempty text. A capture/device failure without complete audio cannot be retried.
+
+Escape in Settings discards unsaved edits and closes Settings without confirmation,
+saving or restarting the tray application. The window's normal close button still asks
+before discarding changed settings. Settings gets priority if Escape is pressed while
+Settings is active during a recording.
 
 ## Escape suppression and window visibility follow-up (2026-09-06)
 

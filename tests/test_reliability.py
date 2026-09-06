@@ -39,7 +39,6 @@ class ReliabilityTests(unittest.TestCase):
         app.failed_recordings = []
         app._retrying = False
         app.retry_transcript_action = Mock()
-        app.discard_failed_action = Mock()
         app._shutdown_action = None
         app._continue_recording = False
         app.local_model = None
@@ -218,17 +217,15 @@ class ReliabilityTests(unittest.TestCase):
         app.on_transcription_failed(data)
         self.assertEqual(len(app.failed_recordings), 1)
 
-    def test_successful_retry_removes_only_oldest_failed_recording(self):
+    def test_successful_retry_clears_failed_recording(self):
         app = self.app()
-        oldest, newer = (np.ones(1600), 16000), (np.ones(3200), 16000)
-        app.failed_recordings = [oldest, newer]
+        app.failed_recordings = [(np.ones(1600), 16000)]
         app._retrying = True
         app.result_thread = Mock(transcription_succeeded=True)
         with patch.object(app, 'update_tray_icon'):
             app.on_worker_finished()
-        self.assertEqual(len(app.failed_recordings), 1)
-        self.assertIs(app.failed_recordings[0], newer)
-        app.retry_transcript_action.setEnabled.assert_called_with(True)
+        self.assertEqual(app.failed_recordings, [])
+        app.retry_transcript_action.setEnabled.assert_called_with(False)
 
     def test_error_icon_survives_worker_idle(self):
         app = self.app()
@@ -236,22 +233,34 @@ class ReliabilityTests(unittest.TestCase):
         app.failed_recordings = [(np.ones(1600), 16000)]
         app.update_tray_icon('idle')
         app.tray_icon.setIcon.assert_called_with(app.tray_icon_error)
-        self.assertIn('1 to retry', app.tray_icon.setToolTip.call_args.args[0])
+        self.assertIn('retry available', app.tray_icon.setToolTip.call_args.args[0])
 
-    def test_full_failure_queue_prevents_silent_audio_loss(self):
+    def test_next_recording_discards_previous_failed_audio(self):
         app = self.app()
-        app.failed_recordings = [(np.ones(1600), 16000)] * 5
+        app.failed_recordings = [(np.ones(1600), 16000)]
+        with patch.object(app, '_start_worker') as start:
+            app.start_result_thread()
+        start.assert_called_once()
+        self.assertEqual(app.failed_recordings, [])
+
+    def test_ignored_start_does_not_discard_retry_audio(self):
+        app = self.app()
+        app.failed_recordings = [(np.ones(1600), 16000)]
+        app.result_thread = Mock()
         with patch.object(app, '_start_worker') as start:
             app.start_result_thread()
         start.assert_not_called()
-        app.tray_icon.showMessage.assert_called_once()
+        self.assertEqual(len(app.failed_recordings), 1)
 
-    def test_discard_removes_only_oldest_failure(self):
+    def test_escape_in_active_settings_does_not_cancel_recording(self):
         app = self.app()
-        app.failed_recordings = [('first', 16000), ('second', 16000)]
-        with patch.object(app, 'update_tray_icon'):
-            app.discard_failed_recording()
-        self.assertEqual(app.failed_recordings, [('second', 16000)])
+        app.settings_window = Mock()
+        app.settings_window.isActiveWindow.return_value = True
+        app.result_thread = Mock()
+        app.current_status = 'recording'
+        app.on_cancel_key()
+        app.settings_window.discard_and_close.assert_called_once()
+        app.result_thread.cancel_recording.assert_not_called()
 
     def test_dotool_rejects_command_injection(self):
         simulator = InputSimulator.__new__(InputSimulator)
