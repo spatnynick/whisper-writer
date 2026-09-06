@@ -1,13 +1,16 @@
 import os
+import json
 import subprocess
 import sys
 from dotenv import set_key, load_dotenv
 from PyQt5.QtWidgets import (
     QApplication, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox,
-    QMessageBox, QShortcut, QTabWidget, QWidget, QSizePolicy, QSpacerItem, QToolButton, QStyle, QFileDialog
+    QMessageBox, QShortcut, QTabWidget, QWidget, QSizePolicy, QSpacerItem, QToolButton, QStyle,
+    QFileDialog, QTextEdit
 )
-from PyQt5.QtCore import Qt, QCoreApplication, QProcess, pyqtSignal
+from PyQt5.QtCore import Qt, QCoreApplication, QProcess, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QIcon, QKeySequence
+from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from ui.base_window import BaseWindow
@@ -31,6 +34,16 @@ class SettingsWindow(BaseWindow):
         # (no config.yaml yet) a save must still take the restart path, since that's what
         # actually creates them.
         self.allow_live_reload = False
+        self.model_discovery_manager = QNetworkAccessManager(self)
+        self.model_discovery_reply = None
+        self.model_discovery_request_id = 0
+        self.model_discovery_timeout = QTimer(self)
+        self.model_discovery_timeout.setSingleShot(True)
+        self.model_discovery_timeout.timeout.connect(self._on_model_discovery_timeout)
+        self.model_refresh_debounce = QTimer(self)
+        self.model_refresh_debounce.setSingleShot(True)
+        self.model_refresh_debounce.setInterval(600)
+        self.model_refresh_debounce.timeout.connect(self.refresh_api_models)
         self.init_settings_ui()
         self.baseline_values = self.collect_current_values()
         self.escape_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
@@ -61,8 +74,21 @@ class SettingsWindow(BaseWindow):
         # Connect the use_api checkbox state change
         self.use_api_checkbox = self.findChild(QCheckBox, 'model_options_use_api_input')
         if self.use_api_checkbox:
-            self.use_api_checkbox.stateChanged.connect(lambda: self.toggle_api_local_options(self.use_api_checkbox.isChecked()))
-            self.toggle_api_local_options(self.use_api_checkbox.isChecked())
+            self.use_api_checkbox.stateChanged.connect(self.on_api_mode_changed)
+            self.on_api_mode_changed(self.use_api_checkbox.isChecked())
+
+        self.api_base_url_input = self.findChild(QLineEdit, 'model_options_api_base_url_input')
+        self.api_key_input = self.findChild(QLineEdit, 'model_options_api_api_key_input')
+        if self.api_base_url_input:
+            self.api_base_url_input.textChanged.connect(self._schedule_model_refresh)
+            self.api_base_url_input.editingFinished.connect(self.refresh_api_models)
+        if self.api_key_input:
+            self.api_key_input.editingFinished.connect(self.refresh_api_models)
+        if getattr(self, 'api_model_refresh_button', None):
+            self.api_model_refresh_button.clicked.connect(self.refresh_api_models)
+
+        if self.use_api_checkbox and self.use_api_checkbox.isChecked():
+            QTimer.singleShot(0, self.refresh_api_models)
 
     def create_tabs(self):
         """Create tabs for each category in the schema."""
@@ -150,12 +176,27 @@ class SettingsWindow(BaseWindow):
 
     def create_settings_widgets(self, layout, category, settings):
         """Create widgets for each setting in a category."""
+        deferred_prompt = None
         for sub_category, sub_settings in settings.items():
             if isinstance(sub_settings, dict) and 'value' in sub_settings:
                 self.add_setting_widget(layout, sub_category, sub_settings, category)
             else:
                 for key, meta in sub_settings.items():
+                    if category == 'model_options' and sub_category == 'common' and key == 'initial_prompt':
+                        deferred_prompt = (key, meta, sub_category)
+                        continue
                     self.add_setting_widget(layout, key, meta, category, sub_category)
+
+        if deferred_prompt:
+            key, meta, sub_category = deferred_prompt
+            layout.addSpacing(28)
+            prompt_heading = QLabel('Prompt context (optional)')
+            prompt_heading.setObjectName('model_options_common_initial_prompt_heading')
+            prompt_font = prompt_heading.font()
+            prompt_font.setBold(True)
+            prompt_heading.setFont(prompt_font)
+            layout.addWidget(prompt_heading)
+            self.add_setting_widget(layout, key, meta, category, sub_category)
 
     def create_buttons(self):
         """Create reset and save buttons, side by side on one line."""
@@ -190,6 +231,8 @@ class SettingsWindow(BaseWindow):
             item_layout.addWidget(widget)
         else:
             item_layout.addLayout(widget)
+        if category == 'model_options' and sub_category == 'common' and key == 'initial_prompt':
+            item_layout.addWidget(self.create_prompt_link())
         item_layout.addWidget(help_button)
         layout.addLayout(item_layout)
 
@@ -214,6 +257,10 @@ class SettingsWindow(BaseWindow):
         meta_type = meta.get('type')
         current_value = self.get_config_value(category, sub_category, key, meta)
 
+        if category == 'model_options' and sub_category == 'api' and key == 'model':
+            return self.create_api_model_selector(current_value)
+        if category == 'model_options' and sub_category == 'common' and key == 'initial_prompt':
+            return self.create_text_edit(current_value)
         if meta_type == 'bool':
             return self.create_checkbox(current_value, key)
         elif meta_type == 'str' and 'options' in meta:
@@ -237,6 +284,38 @@ class SettingsWindow(BaseWindow):
         widget.setCurrentText(value)
         return widget
 
+    def create_api_model_selector(self, value):
+        """Create an editable API model combo with an explicit model-list refresh button."""
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        combo = QComboBox(container)
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        combo.setObjectName('model_options_api_model_selector')
+        if value:
+            combo.addItem(str(value))
+            combo.setCurrentText(str(value))
+        layout.addWidget(combo, 1)
+
+        refresh_button = QPushButton('Refresh', container)
+        refresh_button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        refresh_button.setToolTip('Load models from the configured API base URL')
+        refresh_button.setObjectName('model_options_api_model_refresh')
+        layout.addWidget(refresh_button)
+
+        status = QLabel('', container)
+        status.setObjectName('model_options_api_model_status')
+        status.setMinimumWidth(80)
+        status.setToolTip('Model discovery status')
+        layout.addWidget(status)
+
+        self.api_model_combo = combo
+        self.api_model_refresh_button = refresh_button
+        self.api_model_status = status
+        return container
+
     def create_line_edit(self, value, key=None):
         widget = QLineEdit(value)
         if key == 'api_key':
@@ -254,6 +333,17 @@ class SettingsWindow(BaseWindow):
             return container
         return widget
 
+    def create_text_edit(self, value):
+        """Create a compact multi-line editor for longer prompt text."""
+        widget = QTextEdit()
+        widget.setAcceptRichText(False)
+        widget.setTabChangesFocus(True)
+        widget.setPlainText(str(value) if value is not None else '')
+        widget.setMinimumHeight(80)
+        widget.setMaximumHeight(140)
+        widget.setPlaceholderText('Optional words, names, or context for the transcription model')
+        return widget
+
     def create_help_button(self, description):
         help_button = QToolButton()
         help_button.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxQuestion))
@@ -263,6 +353,20 @@ class SettingsWindow(BaseWindow):
         help_button.setFocusPolicy(Qt.TabFocus)
         help_button.clicked.connect(lambda: self.show_description(description))
         return help_button
+
+    def create_prompt_link(self):
+        """Add a visible link to OpenAI's prompting guidance beside the prompt editor."""
+        link = QLabel(
+            '<a href="https://platform.openai.com/docs/guides/speech-to-text/prompting">'
+            'Prompting guide</a>'
+        )
+        link.setOpenExternalLinks(True)
+        link.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        link.setToolTip('Open the OpenAI prompting guide in your browser')
+        link.setCursor(Qt.PointingHandCursor)
+        link.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        link.setObjectName('model_options_common_initial_prompt_link')
+        return link
 
     def get_config_value(self, category, sub_category, key, meta):
         if sub_category:
@@ -277,6 +381,160 @@ class SettingsWindow(BaseWindow):
     def show_description(self, description):
         """Show a description dialog."""
         QMessageBox.information(self, 'Description', description)
+
+    def on_api_mode_changed(self, use_api):
+        """Toggle API/local options and refresh API models when API mode is enabled."""
+        self.toggle_api_local_options(use_api)
+        if use_api:
+            self._schedule_model_refresh()
+        else:
+            self._cancel_model_discovery()
+            self._set_model_discovery_status('')
+
+    def _schedule_model_refresh(self):
+        """Debounce URL edits so a pasted/typed endpoint triggers one model request."""
+        if self.use_api_checkbox and self.use_api_checkbox.isChecked():
+            self.model_refresh_debounce.start()
+
+    @staticmethod
+    def _models_url(base_url):
+        """Return the OpenAI-compatible models endpoint for a configured base URL."""
+        value = (base_url or '').strip().rstrip('/')
+        if not value:
+            return QUrl()
+        url = QUrl(value + '/models')
+        if not url.isValid() or url.scheme() not in ('http', 'https') or not url.host():
+            return QUrl()
+        return url
+
+    @staticmethod
+    def _extract_model_ids(payload):
+        """Extract model IDs from OpenAI-compatible and common local-server responses."""
+        if isinstance(payload, dict):
+            entries = payload.get('data')
+            if not isinstance(entries, list):
+                entries = payload.get('models')
+        else:
+            entries = payload
+        if not isinstance(entries, list):
+            return []
+
+        model_ids = []
+        for entry in entries:
+            if isinstance(entry, str):
+                model_id = entry.strip()
+            elif isinstance(entry, dict):
+                model_id = entry.get('id') or entry.get('name')
+                model_id = model_id.strip() if isinstance(model_id, str) else ''
+            else:
+                model_id = ''
+            if model_id and model_id not in model_ids:
+                model_ids.append(model_id)
+        return model_ids
+
+    def _set_model_discovery_status(self, text, error=False):
+        status = getattr(self, 'api_model_status', None)
+        if not status:
+            return
+        status.setText(text)
+        status.setToolTip(text or 'Model discovery status')
+        if error:
+            status.setStyleSheet('color: #c0392b;')
+        else:
+            status.setStyleSheet('')
+
+    def _cancel_model_discovery(self):
+        self.model_discovery_request_id += 1
+        self.model_discovery_timeout.stop()
+        reply = self.model_discovery_reply
+        self.model_discovery_reply = None
+        refresh_button = getattr(self, 'api_model_refresh_button', None)
+        if refresh_button:
+            refresh_button.setEnabled(True)
+        if reply:
+            reply.abort()
+
+    def refresh_api_models(self):
+        """Load models from the configured API endpoint without blocking the settings UI."""
+        self.model_refresh_debounce.stop()
+        if self.use_api_checkbox and not self.use_api_checkbox.isChecked():
+            return
+
+        self._cancel_model_discovery()
+        url = self._models_url(self.api_base_url_input.text() if self.api_base_url_input else '')
+        if not url.isValid():
+            self._set_model_discovery_status('Invalid URL', error=True)
+            return
+
+        self.model_discovery_request_id += 1
+        request_id = self.model_discovery_request_id
+        request = QNetworkRequest(url)
+        request.setHeader(QNetworkRequest.UserAgentHeader, 'WhisperWriter')
+        api_key = self.api_key_input.text().strip() if self.api_key_input else ''
+        if api_key:
+            request.setRawHeader(b'Authorization', f'Bearer {api_key}'.encode('utf-8'))
+
+        self.api_model_refresh_button.setEnabled(False)
+        self._set_model_discovery_status('Loading...')
+        reply = self.model_discovery_manager.get(request)
+        self.model_discovery_reply = reply
+        reply.finished.connect(lambda reply=reply, request_id=request_id: self._on_model_discovery_finished(reply, request_id))
+        self.model_discovery_timeout.start(5000)
+
+    def _on_model_discovery_timeout(self):
+        reply = self.model_discovery_reply
+        if not reply:
+            return
+        self.model_discovery_reply = None
+        self.model_discovery_request_id += 1
+        reply.abort()
+        self.api_model_refresh_button.setEnabled(True)
+        self._set_model_discovery_status('Request timed out', error=True)
+
+    def _on_model_discovery_finished(self, reply, request_id):
+        reply.deleteLater()
+        if request_id != self.model_discovery_request_id:
+            return
+        self.model_discovery_reply = None
+        self.model_discovery_timeout.stop()
+        self.api_model_refresh_button.setEnabled(True)
+
+        status_code = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
+        if reply.error() != QNetworkReply.NoError:
+            self._set_model_discovery_status('Unavailable', error=True)
+            return
+        if status_code is not None and int(status_code) >= 400:
+            self._set_model_discovery_status(f'HTTP {int(status_code)}', error=True)
+            return
+
+        try:
+            payload = json.loads(bytes(reply.readAll()).decode('utf-8'))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._set_model_discovery_status('Invalid response', error=True)
+            return
+
+        model_ids = self._extract_model_ids(payload)
+        if not model_ids:
+            self._set_model_discovery_status('No models found', error=True)
+            return
+        self._replace_api_model_options(model_ids)
+        count = len(model_ids)
+        self._set_model_discovery_status(f'{count} model' + ('' if count == 1 else 's'))
+
+    def _replace_api_model_options(self, model_ids):
+        """Replace discovered choices while preserving a manually entered model if needed."""
+        combo = self.api_model_combo
+        current = combo.currentText().strip()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(model_ids)
+        if current and current not in model_ids:
+            combo.insertItem(0, current)
+        if current:
+            combo.setCurrentText(current)
+        elif model_ids:
+            combo.setCurrentIndex(0)
+        combo.blockSignals(False)
 
     def save_settings(self):
         """Save the settings to the config file and .env file. If nothing actually changed,
@@ -363,14 +621,19 @@ class SettingsWindow(BaseWindow):
         if isinstance(widget, QCheckBox):
             widget.setChecked(value)
         elif isinstance(widget, QComboBox):
-            widget.setCurrentText(value)
+            widget.setCurrentText(str(value) if value is not None else '')
         elif isinstance(widget, QLineEdit):
             widget.setText(str(value) if value is not None else '')
+        elif isinstance(widget, QTextEdit):
+            widget.setPlainText(str(value) if value is not None else '')
         elif isinstance(widget, QWidget) and widget.layout():
-            # This is for the model_path widget
-            line_edit = widget.layout().itemAt(0).widget()
-            if isinstance(line_edit, QLineEdit):
-                line_edit.setText(str(value) if value is not None else '')
+            input_widget = self._container_input_widget(widget)
+            if isinstance(input_widget, QComboBox):
+                input_widget.setCurrentText(str(value) if value is not None else '')
+            elif isinstance(input_widget, QLineEdit):
+                input_widget.setText(str(value) if value is not None else '')
+            elif isinstance(input_widget, QTextEdit):
+                input_widget.setPlainText(str(value) if value is not None else '')
 
     def get_widget_value_typed(self, widget, value_type):
         """Get the value of the widget with proper typing."""
@@ -386,11 +649,27 @@ class SettingsWindow(BaseWindow):
                 return float(text) if text else None
             else:
                 return text or None
+        elif isinstance(widget, QTextEdit):
+            return widget.toPlainText() or None
         elif isinstance(widget, QWidget) and widget.layout():
-            # This is for the model_path widget
-            line_edit = widget.layout().itemAt(0).widget()
-            if isinstance(line_edit, QLineEdit):
-                return line_edit.text() or None
+            input_widget = self._container_input_widget(widget)
+            if isinstance(input_widget, QComboBox):
+                return input_widget.currentText() or None
+            if isinstance(input_widget, QLineEdit):
+                return input_widget.text() or None
+            if isinstance(input_widget, QTextEdit):
+                return input_widget.toPlainText() or None
+        return None
+
+    @staticmethod
+    def _container_input_widget(widget):
+        """Return the editable control hosted by a composite setting widget."""
+        if not widget.layout():
+            return None
+        for index in range(widget.layout().count()):
+            child = widget.layout().itemAt(index).widget()
+            if isinstance(child, (QComboBox, QLineEdit, QTextEdit)):
+                return child
         return None
 
     def toggle_api_local_options(self, use_api):

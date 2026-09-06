@@ -13,12 +13,13 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 import numpy as np
 from PyQt5.QtCore import QObject, QThread, Qt
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QComboBox, QLabel, QLineEdit, QTextEdit, QWidget
 from utils import ConfigManager
 from result_thread import ResultThread
 from main import WhisperWriterApp
 from input_simulation import InputSimulator
 import transcription
+from ui.settings_window import SettingsWindow
 
 APP = QApplication.instance() or QApplication([])
 
@@ -249,6 +250,84 @@ class ReliabilityTests(unittest.TestCase):
                 ConfigManager._instance.load_user_config(path)
                 self.assertIsInstance(ConfigManager.get_config_section('misc'), dict)
                 self.assertIsInstance(ConfigManager.get_config_section('model_options', 'api'), dict)
+
+    def test_settings_model_controls_and_prompt_editor(self):
+        settings = SettingsWindow()
+        try:
+            settings.show()
+            APP.processEvents()
+            base_url = settings.findChild(QLineEdit, 'model_options_api_base_url_input')
+            model_container = settings.findChild(QWidget, 'model_options_api_model_input')
+            model_combo = settings.findChild(QComboBox, 'model_options_api_model_selector')
+            prompt = settings.findChild(QTextEdit, 'model_options_common_initial_prompt_input')
+            prompt_link = settings.findChild(QLabel, 'model_options_common_initial_prompt_link')
+            self.assertIsNotNone(base_url)
+            self.assertIsNotNone(model_container)
+            self.assertIsNotNone(model_combo)
+            self.assertIsNotNone(prompt)
+            self.assertIsNotNone(prompt_link)
+            self.assertTrue(model_combo.isEditable())
+            self.assertEqual(settings.get_widget_value_typed(model_container, 'str'), 'whisper-1')
+            self.assertIsNone(settings.get_widget_value_typed(prompt, 'str'))
+            self.assertTrue(prompt_link.openExternalLinks())
+            self.assertGreater(prompt.geometry().top(), settings.height() // 3)
+            api_order = list(ConfigManager.get_schema()['model_options']['api'])
+            self.assertLess(api_order.index('base_url'), api_order.index('model'))
+        finally:
+            settings.reset_settings()
+            settings.close()
+
+    def test_model_discovery_extracts_openai_and_local_shapes(self):
+        self.assertEqual(
+            SettingsWindow._extract_model_ids({'data': [{'id': 'one'}, {'id': 'two'}, {'id': 'one'}]}),
+            ['one', 'two'],
+        )
+        self.assertEqual(
+            SettingsWindow._extract_model_ids({'models': [{'name': 'local-one'}, 'local-two']}),
+            ['local-one', 'local-two'],
+        )
+        self.assertEqual(SettingsWindow._models_url('http://localhost:1234/v1/').toString(), 'http://localhost:1234/v1/models')
+
+    def test_settings_refreshes_models_from_configured_endpoint(self):
+        calls = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                calls.append(self.path)
+                body = b'{"data": [{"id": "remote-one"}, {"id": "remote-two"}]}'
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        settings = SettingsWindow()
+        try:
+            settings.use_api_checkbox.setChecked(True)
+            settings.api_base_url_input.setText(f'http://127.0.0.1:{server.server_port}/v1')
+            settings.refresh_api_models()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                APP.processEvents()
+                if settings.api_model_combo.findText('remote-one') >= 0:
+                    break
+                time.sleep(.01)
+            self.assertEqual(calls, ['/v1/models'])
+            self.assertGreaterEqual(settings.api_model_combo.findText('remote-one'), 0)
+            self.assertGreaterEqual(settings.api_model_combo.findText('remote-two'), 0)
+            self.assertEqual(settings.api_model_status.text(), '2 models')
+        finally:
+            settings.reset_settings()
+            settings.close()
+            server.shutdown()
+            server.server_close()
+            thread.join()
 
     def test_atomic_config_failure_preserves_old_file(self):
         with tempfile.TemporaryDirectory() as tmp:

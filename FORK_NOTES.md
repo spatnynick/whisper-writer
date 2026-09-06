@@ -27,6 +27,11 @@ is waiting for retry, so audio work is not interrupted or silently lost.
 The launcher preserves `OPENAI_API_KEY`; `.env` supplies it when absent from the environment.
 A custom endpoint without a key receives a placeholder. `model_options.api.timeout_seconds`
 defaults to 120 seconds of HTTP inactivity; increase it in Settings for a slower server.
+Settings places the API base URL before an editable model dropdown. Changing the URL or
+pressing **Refresh** loads model IDs from the endpoint's OpenAI-compatible `/models` route
+without blocking the window; if discovery is unavailable, the model can still be typed
+manually. The common initial prompt is a separated multi-line editor with a clickable link
+to OpenAI's prompting guide.
 Requests are not retried automatically. Exit/settings restart waits for active worker work
 without blocking Qt; a native model call still has to finish. Complete dictation before an
 external process restart/update, which terminates in-flight work.

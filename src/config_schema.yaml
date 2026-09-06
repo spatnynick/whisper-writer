@@ -18,22 +18,22 @@ model_options:
     initial_prompt:
       value: null
       type: str
-      description: "A string used as an initial prompt to condition the transcription. More info: https://platform.openai.com/docs/guides/speech-to-text/prompting"
+      description: "Optional multi-line context used as an initial prompt to condition the transcription. More info: https://platform.openai.com/docs/guides/speech-to-text/prompting"
 
   # Configuration options for the OpenAI API
   api:
+    base_url:
+      value: https://api.openai.com/v1
+      type: str
+      description: "The base URL for an OpenAI-compatible API. The model list is loaded from this URL when the endpoint supports GET /models."
+    model:
+      value: whisper-1
+      type: str
+      description: "The transcription model. Use the dropdown after refreshing the models available at the configured base URL, or enter a model name manually."
     timeout_seconds:
       value: 120
       type: int
       description: "HTTP inactivity timeout in seconds. Failed requests are not automatically retried. Increase for slow transcription servers."
-    model:
-      value: whisper-1
-      type: str
-      description: "The model to use for transcription. Currently only 'whisper-1' is available."
-    base_url:
-      value: https://api.openai.com/v1
-      type: str
-      description: "The base URL for the API. Can be changed to use a local API endpoint."
     api_key:
       value: null
       type: str

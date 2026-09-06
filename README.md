@@ -121,11 +121,11 @@ WhisperWriter uses a configuration file to customize its behaviour. To set up th
 - `common`: Options common to both API and local models.
   - `language`: The language code for the transcription in [ISO-639-1 format](https://en.wikipedia.org/wiki/List_of_ISO_639_language_codes). (Default: `null`)
   - `temperature`: Controls the randomness of the transcription output. Lower values make the output more focused and deterministic. (Default: `0.0`)
-  - `initial_prompt`: A string used as an initial prompt to condition the transcription. More info: [OpenAI Prompting Guide](https://platform.openai.com/docs/guides/speech-to-text/prompting). (Default: `null`)
+  - `initial_prompt`: Optional multi-line context used to condition the transcription. More info: [OpenAI Prompting Guide](https://platform.openai.com/docs/guides/speech-to-text/prompting). (Default: `null`)
 
 - `api`: Configuration options for the OpenAI API. See the [OpenAI API documentation](https://platform.openai.com/docs/api-reference/audio/create?lang=python) for more information.
-  - `model`: The model to use for transcription. Currently, only `whisper-1` is available. (Default: `whisper-1`)
-  - `base_url`: The base URL for the API. Can be changed to use a local API endpoint, such as [LocalAI](https://localai.io/). (Default: `https://api.openai.com/v1`)
+  - `base_url`: The base URL for an OpenAI-compatible API. The Settings window can load models from its `/models` endpoint. (Default: `https://api.openai.com/v1`)
+  - `model`: The transcription model. The Settings window provides an editable dropdown and Refresh button when the endpoint exposes available models. (Default: `whisper-1`)
   - `api_key`: Your API key for the OpenAI API. Required for non-local API usage. (Default: `null`)
 
 - `local`: Configuration options for the local Whisper model.
