@@ -4,9 +4,20 @@
 # Gitignored venv/ and config.yaml survive; dependencies are reconciled by pip.
 #
 # Usage: ./update.sh   (from anywhere, or via the installed `whisperwriter-update` alias)
+#        ./update.sh --check-only   (exit 0=current, 10=update available)
 set -euo pipefail
 
 main() {
+    local check_only=0
+    case "${1:-}" in
+        "") ;;
+        --check-only) check_only=1 ;;
+        *)
+            echo "Usage: $0 [--check-only]" >&2
+            exit 2
+            ;;
+    esac
+
     local install_dir
     install_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     cd "$install_dir"
@@ -20,6 +31,10 @@ main() {
 
     local branch
     branch="$(git rev-parse --abbrev-ref HEAD)"
+    if [ "$branch" = "HEAD" ]; then
+        echo "Error: checkout is in detached HEAD state; cannot select an update branch." >&2
+        exit 1
+    fi
 
     if [ -n "$(git status --porcelain)" ]; then
         echo "Error: local changes present, refusing to update. Commit or stash them first:" >&2
@@ -35,8 +50,16 @@ main() {
     new_head="$(git rev-parse "origin/$branch")"
 
     if [ "$old_head" = "$new_head" ]; then
+        echo "NO_UPDATE"
+        if [ "$check_only" -eq 1 ]; then
+            exit 0
+        fi
         echo "Already up to date (${old_head:0:7})."
     else
+        echo "UPDATE_AVAILABLE"
+        if [ "$check_only" -eq 1 ]; then
+            exit 10
+        fi
 
         echo "Updating $branch: ${old_head:0:7} -> ${new_head:0:7}"
         git log --oneline "$old_head..$new_head"

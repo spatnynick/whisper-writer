@@ -39,8 +39,10 @@ class ReliabilityTests(unittest.TestCase):
         app.failed_recordings = []
         app._retrying = False
         app.retry_transcript_action = Mock()
+        app.update_action = Mock()
         app._shutdown_action = None
         app._continue_recording = False
+        app._update_process = None
         app.local_model = None
         app.result_thread = None
         app.current_status = 'idle'
@@ -48,7 +50,52 @@ class ReliabilityTests(unittest.TestCase):
         app.input_simulator = Mock()
         app.tray_icon = Mock()
         app.copy_last_transcript_action = Mock()
+        app.settings_window = Mock()
+        app.settings_window.isVisible.return_value = False
         return app
+
+    def test_update_check_current_shows_information(self):
+        app = self.app()
+        process = Mock()
+        process.readAllStandardOutput.return_value = b'NO_UPDATE\n'
+        app._update_process = process
+        with patch.object(app, '_show_update_message') as show:
+            app._on_update_check_finished(0, None)
+        show.assert_called_once_with('WhisperWriter', 'No update available. This installation is current.')
+        process.deleteLater.assert_called_once()
+        app.update_action.setEnabled.assert_called_with(True)
+
+    def test_update_check_available_starts_detached_updater(self):
+        app = self.app()
+        process = Mock()
+        process.readAllStandardOutput.return_value = b'UPDATE_AVAILABLE\n'
+        app._update_process = process
+        with patch.object(app, '_start_update') as start:
+            app._on_update_check_finished(10, None)
+        start.assert_called_once()
+
+    def test_update_check_error_shows_warning(self):
+        app = self.app()
+        process = Mock()
+        process.readAllStandardOutput.return_value = b'fetch failed\n'
+        app._update_process = process
+        with patch.object(app, '_show_update_message') as show:
+            app._on_update_check_finished(1, None)
+        self.assertEqual(show.call_args.args[0], 'Update check failed')
+
+    def test_update_is_blocked_while_worker_is_active(self):
+        app = self.app()
+        app.result_thread = Mock()
+        app.check_for_updates()
+        app.tray_icon.showMessage.assert_called_once()
+        app.update_action.setEnabled.assert_not_called()
+
+    def test_detached_update_failure_reenables_action(self):
+        app = self.app()
+        with patch('main.QProcess.startDetached', return_value=(False, None)), patch.object(app, '_show_update_message') as show:
+            app._start_update()
+        app.update_action.setEnabled.assert_called_with(True)
+        self.assertEqual(show.call_args.args[0], 'Update failed')
 
     def test_early_release_is_not_overwritten(self):
         worker = ResultThread()

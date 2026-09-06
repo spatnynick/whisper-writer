@@ -16,6 +16,11 @@ code only: follow it with `venv/bin/python3 -m pip install -r requirements.txt` 
 and restarts a running instance even if Git is already current. It no longer upgrades pip.
 Restart output is in `${XDG_CACHE_HOME:-~/.cache}/whisper-writer/restart.log`.
 
+The tray's **Update** action runs `./update.sh --check-only` against the `origin` remote
+and current branch. If the checkout is current it opens an information popup; if a newer
+commit exists it starts the normal dependency-repair and restart path. The action refuses
+to update while a recording or transcription is active so audio work is not interrupted.
+
 The launcher preserves `OPENAI_API_KEY`; `.env` supplies it when absent from the environment.
 A custom endpoint without a key receives a placeholder. `model_options.api.timeout_seconds`
 defaults to 120 seconds of HTTP inactivity; increase it in Settings for a slower server.

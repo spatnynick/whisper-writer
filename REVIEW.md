@@ -23,6 +23,7 @@ installed-package audit, not a guarantee that all vulnerabilities or hardware fa
 | Medium | Empty/non-mapping YAML or malformed sections crashed config loading; interrupted saves could truncate config. | Ignore invalid section shapes and save YAML via an atomic replacement. Full scalar validation remains open. |
 | Medium | HTTP clients were not explicitly closed; default SDK retries prolonged failures. | Close each client; disable automatic retries; add a 120-second configurable HTTP inactivity timeout. This is not a total request deadline. |
 | Medium | Local transcription interpreted non-16-kHz arrays as 16-kHz audio. | Reject incompatible local recording rates before opening the microphone. API WAV files retain the configured sample rate. |
+| Medium | There was no in-app way to discover and apply a newer commit. | The tray Update action now checks `origin/<current branch>` asynchronously, reports when current, and starts the existing fast-forward updater when a commit is available. |
 
 Dependency audit evidence, with duplicate advisory IDs removed, is in
 [docs/dependency-audit-2026-09-06.json](docs/dependency-audit-2026-09-06.json).
@@ -88,6 +89,26 @@ Advisory counts describe installed versions, not demonstrated exploitability thr
    Error recovery preserves text, but cannot undo partial typing. Fuzzy glossary corrections
    can change legitimate words; evaluate against representative dictation before tuning them.
 
+7. **Future feature: transcribe while recording.** Process a configurable chunk (for example,
+   eight seconds) while capture continues, then transcribe the final partial chunk when the
+   user stops. This can reduce the wait after stopping, but it needs overlapping audio and
+   reconciliation because Whisper may revise words near chunk boundaries. The implementation
+   should keep one capture stream and a bounded transcription queue, assign recording/chunk
+   IDs, preserve output order, and show whether a result is provisional or final. If a chunk
+   takes longer to process than the interval, latency grows instead of improving; the UI needs
+   a backlog indicator and a clear policy for queue limits. For API mode, the server must also
+   keep up with the selected interval and repeated uploads may increase cost and bandwidth.
+
+8. **Future feature: model warm-up.** The first transcription can be slower because a local
+   model may initialize CUDA kernels or JIT paths, while a remote server may load the model or
+   compile its inference graph on its first request. Measure cold and warm request timings before
+   choosing a fix. For a self-hosted remote service, the strongest solution is server-side model
+   preloading plus one real short inference warm-up after startup; a health-check request alone
+   may not exercise the model. For local mode, an optional short silent warm-up after model
+   creation can move the delay to application startup, at the cost of startup time and GPU/CPU
+   resources. Periodic keep-warm requests should be opt-in because they consume resources and
+   still cannot prevent a server, proxy or GPU from unloading the model.
+
 ## Verification and limits
 
 Run `venv/bin/python -m unittest discover -s tests -v` from the checkout. Tests use dummy
@@ -105,3 +126,7 @@ Follow-up verification: all 27 headless regression tests passed, including real 
 retry using identical WAV audio, retry failures and discarding failed audio on the next recording.
 Seven isolated X11 checks passed both with bare Xvfb and with KDE KWin, covering suppression,
 existing desktop grabs, the real pynput observer, popup focus, Settings activation and Escape discarding Settings edits without quitting.
+
+The tray-update follow-up adds shell checks for current and newer remote commits, plus GUI
+checks for the current, available, failed and worker-active update paths. The updater uses the
+existing `origin` remote and current branch; it does not modify or merge a divergent checkout.

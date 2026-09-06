@@ -18,6 +18,8 @@ from utils import ConfigManager
 
 
 logger = logging.getLogger(__name__)
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+UPDATE_SCRIPT = os.path.join(PROJECT_ROOT, 'update.sh')
 
 
 class WhisperWriterApp(QObject):
@@ -41,6 +43,7 @@ class WhisperWriterApp(QObject):
         self._retrying = False
         self._shutdown_action = None
         self._continue_recording = False
+        self._update_process = None
         self.activationRequested.connect(self.on_activation, Qt.QueuedConnection)
         self.deactivationRequested.connect(self.on_deactivation, Qt.QueuedConnection)
         self.cancelRequested.connect(self.on_cancel_key, Qt.QueuedConnection)
@@ -159,6 +162,11 @@ class WhisperWriterApp(QObject):
         settings_action.triggered.connect(self.open_settings)
         tray_menu.addAction(settings_action)
 
+        update_action = QAction(self.app.style().standardIcon(QStyle.SP_ArrowUp), 'Update', self.app)
+        update_action.triggered.connect(self.check_for_updates)
+        self.update_action = update_action
+        tray_menu.addAction(update_action)
+
         tray_menu.addSeparator()
 
         self.copy_last_transcript_action = QAction(self.app.style().standardIcon(QStyle.SP_DialogSaveButton), 'Copy Last Transcript', self.app)
@@ -183,6 +191,98 @@ class WhisperWriterApp(QObject):
     def open_settings(self):
         # Wait until the tray menu releases its popup grab before requesting focus.
         QTimer.singleShot(0, self.settings_window.show_and_activate)
+
+    def _show_update_message(self, title, message, icon=QMessageBox.Information):
+        parent = self.settings_window if self.settings_window.isVisible() else None
+        if icon == QMessageBox.Warning:
+            QMessageBox.warning(parent, title, message)
+        else:
+            QMessageBox.information(parent, title, message)
+
+    def check_for_updates(self):
+        """Check origin/<current branch> without blocking the GUI."""
+        if self._update_process and self._update_process.state() != QProcess.NotRunning:
+            return
+        if self._shutdown_action:
+            return
+        if self.result_thread is not None:
+            self.tray_icon.showMessage(
+                'WhisperWriter',
+                'Finish the current recording or transcription before updating.',
+                QSystemTrayIcon.Information,
+                4000,
+            )
+            return
+
+        self.update_action.setEnabled(False)
+        self.tray_icon.showMessage(
+            'WhisperWriter', 'Checking GitHub for updates...',
+            QSystemTrayIcon.Information, 2500,
+        )
+        process = QProcess(self)
+        process.setWorkingDirectory(PROJECT_ROOT)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.finished.connect(self._on_update_check_finished)
+        process.errorOccurred.connect(self._on_update_check_error)
+        self._update_process = process
+        process.start(UPDATE_SCRIPT, ['--check-only'])
+
+    def _clear_update_process(self):
+        process = self._update_process
+        self._update_process = None
+        self.update_action.setEnabled(True)
+        if process:
+            process.deleteLater()
+        return process
+
+    def _on_update_check_error(self, error):
+        process = self._update_process
+        if process is None or process.state() != QProcess.NotRunning:
+            return
+        self._clear_update_process()
+        logger.warning('Update check process failed: %s', error)
+        self._show_update_message(
+            'Update check failed',
+            'WhisperWriter could not check GitHub. Check your network connection and try again.',
+            QMessageBox.Warning,
+        )
+
+    def _on_update_check_finished(self, exit_code, exit_status):
+        process = self._update_process
+        if process is None:
+            return
+        output = bytes(process.readAllStandardOutput()).decode('utf-8', errors='replace')
+        self._clear_update_process()
+
+        if exit_code == 0 and 'NO_UPDATE' in output:
+            self._show_update_message('WhisperWriter', 'No update available. This installation is current.')
+            return
+        if exit_code == 10 and 'UPDATE_AVAILABLE' in output:
+            self._start_update()
+            return
+
+        logger.warning('Update check exited with code %s: %s', exit_code, output.strip())
+        self._show_update_message(
+            'Update check failed',
+            'WhisperWriter could not determine whether an update is available. Check the application log and try again.',
+            QMessageBox.Warning,
+        )
+
+    def _start_update(self):
+        self.update_action.setEnabled(False)
+        self.tray_icon.showMessage(
+            'WhisperWriter', 'Update available. Updating and restarting...',
+            QSystemTrayIcon.Information, 5000,
+        )
+        started, _pid = QProcess.startDetached(UPDATE_SCRIPT, [], PROJECT_ROOT)
+        if started:
+            return
+        self.update_action.setEnabled(True)
+        self._show_update_message(
+            'Update failed',
+            'WhisperWriter found an update but could not start the updater. Run ./update.sh manually.',
+            QMessageBox.Warning,
+        )
 
     def update_tray_icon(self, status):
         """
