@@ -1,7 +1,7 @@
-# Domain glossary for transcription prompting and post-processing correction.
-# Tracked in git (unlike config.yaml) so it syncs across machines via `git pull`.
+# Domain glossary for post-processing correction.
+# The glossary is not used as an implicit transcription prompt; an empty prompt remains empty.
 #
-# categories: flattened into the Whisper/speaches `initial_prompt` (see glossary.py).
+# categories: terms used by fuzzy post-transcription correction.
 # static_map: exact-phrase replacements applied unconditionally after transcription.
 # fuzzy: near-match correction against category terms, gated by context_triggers.
 

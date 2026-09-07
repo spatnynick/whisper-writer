@@ -1,10 +1,11 @@
 import os
 import sys
 import logging
+from datetime import datetime
 from audioplayer import AudioPlayer
-from PyQt5.QtCore import QObject, QProcess, QTimer, Qt, pyqtSignal, pyqtSlot
+from PyQt5.QtCore import QObject, QProcess, QTimer, Qt, QPoint, pyqtSignal, pyqtSlot
 from PyQt5.QtDBus import QDBusConnection
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QIcon, QPainter, QColor
 from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QAction, QMessageBox, QStyle
 
 from key_listener import KeyListener
@@ -15,6 +16,7 @@ from ui.status_window import StatusWindow
 from transcription import create_local_model
 from input_simulation import InputSimulator
 from utils import ConfigManager
+from config_sync import SyncWorker, load_sync_settings, save_sync_settings, selected_areas
 
 
 logger = logging.getLogger(__name__)
@@ -63,15 +65,32 @@ class WhisperWriterApp(QObject):
         # activations instead, so keep a short click state machine for both forms.
         self._tray_click_pending = False
         self._tray_ignore_double_click = False
+        self._sync_worker = None
+        self._sync_pending_action = None
+        self._sync_pending_settings = None
+        self._sync_restart_after = False
+        self._sync_current_restart_after = False
+        self._sync_settings = None
+        self._sync_needs_attention = False
+        self._sync_timer = QTimer(self)
+        self._sync_timer.timeout.connect(self._on_sync_timer)
         self.activationRequested.connect(self.on_activation, Qt.QueuedConnection)
         self.deactivationRequested.connect(self.on_deactivation, Qt.QueuedConnection)
         self.cancelRequested.connect(self.on_cancel_key, Qt.QueuedConnection)
         ConfigManager.initialize()
+        self._sync_settings = load_sync_settings()
+        self._sync_needs_attention = self._sync_settings.get('status') == 'Error'
 
         self.settings_window = SettingsWindow()
         self.settings_window.settings_closed.connect(self.on_settings_closed)
-        self.settings_window.settings_saved.connect(self.restart_app)
-        self.settings_window.settings_saved_live.connect(self.apply_live_settings)
+        self.settings_window.settings_saved.connect(self.on_settings_saved)
+        self.settings_window.settings_saved_live.connect(self.on_settings_saved_live)
+        self.settings_window.sync_settings_saved.connect(self.on_sync_settings_saved)
+        self.settings_window.sync_test_requested.connect(self.test_sync_connection)
+        self.settings_window.sync_pull_requested.connect(self.pull_sync_settings)
+        self.settings_window.sync_push_requested.connect(self.push_sync_settings)
+        self.settings_window.update_sync_status(self._sync_settings)
+        self._configure_sync_timer()
 
         if ConfigManager.config_file_exists():
             self.initialize_components()
@@ -218,10 +237,212 @@ class WhisperWriterApp(QObject):
 
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.show()
+        self.update_tray_icon('idle')
 
     def open_settings(self):
         # Wait until the tray menu releases its popup grab before requesting focus.
         QTimer.singleShot(0, self.settings_window.show_and_activate)
+
+    def _sync_is_busy(self):
+        """Return whether recording/transcription work must keep Git paused."""
+        return bool(getattr(self, 'result_thread', None)) or getattr(self, 'current_status', None) in (
+            'recording', 'transcribing'
+        )
+
+    def _set_sync_status(self, status, error=None, remote_commit=None, persist=False):
+        """Update synchronization status without opening a dialog or notification."""
+        settings = load_sync_settings()
+        settings['status'] = status
+        if error is not None:
+            settings['last_error'] = error
+        if status in ('Up to date', 'Connection successful'):
+            settings['last_error'] = ''
+        if remote_commit:
+            settings['last_remote_commit'] = remote_commit
+        if persist:
+            if status in ('Up to date', 'Connection successful'):
+                settings['last_success'] = datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')
+            settings = save_sync_settings(settings)
+        self._sync_settings = settings
+        self._sync_needs_attention = status in ('Error', 'Not in sync', 'Push pending')
+        if getattr(self, 'settings_window', None):
+            self.settings_window.update_sync_status(settings)
+        if getattr(self, 'tray_icon', None):
+            self.update_tray_icon(getattr(self, 'current_status', 'idle'))
+
+    def _configure_sync_timer(self):
+        """Apply the locally configured free-form synchronization interval."""
+        timer = getattr(self, '_sync_timer', None)
+        if timer is None:
+            return
+        timer.stop()
+        settings = load_sync_settings()
+        self._sync_settings = settings
+        minutes = settings.get('interval_minutes', 0)
+        if settings.get('enabled') and minutes > 0:
+            # QTimer uses a signed 32-bit millisecond interval.  The input itself remains a
+            # free-form minute value; extremely long intervals are simply capped by Qt.
+            timer.start(min(minutes * 60 * 1000, 2_147_000_000))
+
+    def _on_sync_timer(self):
+        settings = load_sync_settings()
+        if settings.get('enabled') and settings.get('interval_minutes', 0) > 0:
+            self.request_sync('auto', settings=settings)
+            self._configure_sync_timer()
+
+    def _queue_sync(self, action, settings, restart_after=False):
+        """Remember one sync operation until the current worker/recording is finished."""
+        if self._sync_pending_action is None or action != 'auto':
+            self._sync_pending_action = action
+            self._sync_pending_settings = settings
+        self._sync_restart_after = self._sync_restart_after or restart_after
+
+    def request_sync(self, action, settings=None, restart_after=False):
+        """Start or queue a synchronization operation without blocking the GUI."""
+        settings = settings or load_sync_settings()
+        if action != 'test' and not settings.get('enabled'):
+            self._set_sync_status('Disabled', persist=False)
+            return
+        if action != 'test' and not selected_areas(settings):
+            self._set_sync_status('No areas selected', persist=False)
+            return
+
+        if getattr(self, '_sync_worker', None) is not None:
+            self._queue_sync(action, settings, restart_after)
+            return
+        if self._sync_is_busy():
+            self._queue_sync(action, settings, restart_after)
+            self._set_sync_status('Paused until idle', persist=False)
+            return
+        if getattr(self, '_shutdown_action', None) or getattr(self, '_update_phase', None) == 'updating':
+            self._queue_sync(action, settings, restart_after)
+            return
+
+        self._start_sync_worker(action, settings, restart_after)
+
+    def _start_sync_worker(self, action, settings, restart_after=False):
+        labels = {'test': 'Testing connection', 'push': 'Pushing settings',
+                  'pull': 'Pulling settings', 'auto': 'Checking synchronization'}
+        self._sync_current_restart_after = restart_after
+        self._set_sync_status(labels.get(action, 'Synchronizing'), persist=False)
+        worker = SyncWorker(
+            action,
+            settings,
+            getattr(getattr(ConfigManager, '_instance', None), 'config', {}) or {},
+            last_remote_commit=settings.get('last_remote_commit', ''),
+            parent=self,
+        )
+        worker.completed.connect(self._on_sync_completed)
+        worker.failed.connect(self._on_sync_failed)
+        worker.finished.connect(self._on_sync_worker_finished)
+        self._sync_worker = worker
+        worker.start()
+
+    def _on_sync_completed(self, result):
+        """Handle a worker result on the GUI thread."""
+        action = result.get('action') if isinstance(result, dict) else None
+        remote_commit = result.get('remote_commit', '') if isinstance(result, dict) else ''
+        try:
+            if action == 'test':
+                settings = load_sync_settings()
+                self.settings_window.update_sync_branches(
+                    result.get('branches', []), result.get('branch') or result.get('default_branch')
+                )
+                self._set_sync_status('Connection successful', remote_commit=remote_commit, persist=True)
+                return
+
+            if action == 'pull' and result.get('changed'):
+                old_config = getattr(getattr(ConfigManager, '_instance', None), 'config', None)
+                ConfigManager.replace_config(result['config'])
+                try:
+                    ConfigManager.save_config()
+                except Exception:
+                    if old_config is not None:
+                        ConfigManager.replace_config(old_config)
+                    raise
+                if getattr(self, 'settings_window', None):
+                    self.settings_window.update_widgets_from_config()
+                    self.settings_window.baseline_values = self.settings_window.collect_current_values()
+                self._sync_current_restart_after = True
+
+            # A no-op interval check must not rewrite the local status file.  This keeps the
+            # managed synchronization directory completely quiet when neither side changed;
+            # successful operations that changed something (or clear a prior error) still
+            # persist their status normally.
+            previous_settings = load_sync_settings()
+            persist_success = bool(result.get('changed')) or action == 'test' or bool(
+                previous_settings.get('last_error')
+            )
+            self._set_sync_status('Up to date', remote_commit=remote_commit, persist=persist_success)
+        except Exception as error:
+            self._on_sync_failed(str(error))
+
+    def _on_sync_failed(self, error):
+        logger.warning('Synchronization failed: %s', error)
+        self._set_sync_status('Error', error=error, persist=True)
+
+    def _on_sync_worker_finished(self):
+        worker = getattr(self, '_sync_worker', None)
+        self._sync_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+        restart_after = self._sync_current_restart_after
+        self._sync_current_restart_after = False
+        if restart_after:
+            self._sync_pending_action = None
+            self._sync_pending_settings = None
+            if not self._shutdown_action:
+                self._request_shutdown('restart')
+            return
+
+        if self._sync_pending_action is not None and not self._sync_is_busy():
+            QTimer.singleShot(0, self._run_queued_sync)
+
+    def _run_queued_sync(self):
+        if self._sync_worker is not None or self._sync_is_busy():
+            return
+        action = self._sync_pending_action
+        settings = getattr(self, '_sync_pending_settings', None)
+        if action is None:
+            return
+        self._sync_pending_action = None
+        self._sync_pending_settings = None
+        restart_after = self._sync_restart_after
+        self._sync_restart_after = False
+        self.request_sync(action, settings=settings, restart_after=restart_after)
+
+    def on_sync_settings_saved(self):
+        self._sync_settings = load_sync_settings()
+        self._configure_sync_timer()
+        if getattr(self, 'settings_window', None):
+            self.settings_window.update_sync_status(self._sync_settings)
+
+    def on_settings_saved(self):
+        """Push saved settings first when configured, then perform the normal restart."""
+        settings = load_sync_settings()
+        if settings.get('enabled') and settings.get('push_on_save') and selected_areas(settings):
+            self.request_sync('push', settings=settings, restart_after=True)
+        else:
+            self.restart_app()
+
+    def on_settings_saved_live(self):
+        self.apply_live_settings()
+        settings = load_sync_settings()
+        if settings.get('enabled') and settings.get('push_on_save') and selected_areas(settings):
+            self.request_sync('push', settings=settings)
+
+    def test_sync_connection(self, settings):
+        self.request_sync('test', settings=settings)
+
+    def pull_sync_settings(self, settings):
+        # A manual Pull is followed by the normal application restart, even when the selected
+        # values already match locally. Automatic interval pulls restart only when they apply a
+        # changed remote configuration.
+        self.request_sync('pull', settings=settings, restart_after=True)
+
+    def push_sync_settings(self, settings):
+        self.request_sync('push', settings=settings)
 
     def _clear_tray_click(self):
         self._tray_click_pending = False
@@ -398,6 +619,27 @@ class WhisperWriterApp(QObject):
         if self._shutdown_action:
             self._finish_shutdown()
 
+    def _tray_icon_with_sync_marker(self, icon):
+        """Overlay a small red sync marker on the idle icon when sync needs attention."""
+        if not getattr(self, '_sync_needs_attention', False):
+            return icon
+        try:
+            pixmap = icon.pixmap(64, 64)
+            if pixmap.isNull():
+                return icon
+            radius = max(4, pixmap.width() // 8)
+            center = QPoint(pixmap.width() - radius - 2, radius + 2)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(QColor(255, 255, 255))
+            painter.setBrush(QColor(211, 47, 47))
+            painter.drawEllipse(center, radius, radius)
+            painter.end()
+            return QIcon(pixmap)
+        except (AttributeError, TypeError):
+            # Keeps lightweight test doubles and unusual tray backends usable.
+            return icon
+
     def update_tray_icon(self, status):
         """
         Update the system tray icon to reflect the current recording/transcribing status,
@@ -409,8 +651,9 @@ class WhisperWriterApp(QObject):
         model_suffix = ''
         if status in ('recording', 'transcribing', 'error') and active_model:
             model_suffix = f'\nModel: {active_model}'
+        idle_icon = self._tray_icon_with_sync_marker(self.tray_icon_idle)
         if status != 'error' and not ConfigManager.get_config_value('misc', 'show_tray_status_icon'):
-            self.tray_icon.setIcon(self.tray_icon_idle)
+            self.tray_icon.setIcon(idle_icon)
             self.tray_icon.setToolTip(f'WhisperWriter{model_suffix}')
             return
 
@@ -425,8 +668,9 @@ class WhisperWriterApp(QObject):
             suffix = ' — retry available' if self.failed_recordings else ''
             self.tray_icon.setToolTip(f'WhisperWriter — Error{suffix}{model_suffix}')
         elif status in ('idle', 'cancel'):
-            self.tray_icon.setIcon(self.tray_icon_idle)
-            self.tray_icon.setToolTip('WhisperWriter — Idle')
+            self.tray_icon.setIcon(idle_icon)
+            sync_suffix = ' — Sync needs attention' if getattr(self, '_sync_needs_attention', False) else ''
+            self.tray_icon.setToolTip(f'WhisperWriter — Idle{sync_suffix}')
 
     def _update_retry_actions(self):
         count = len(self.failed_recordings)
@@ -788,6 +1032,8 @@ class WhisperWriterApp(QObject):
             self.update_tray_icon('idle')
             if getattr(self, 'status_window', None):
                 self.status_window.updateStatus('idle')
+            if getattr(self, '_sync_pending_action', None) is not None:
+                QTimer.singleShot(0, self._run_queued_sync)
 
     def on_cancel_key(self):
         """

@@ -18,7 +18,7 @@ model_options:
     initial_prompt:
       value: null
       type: str
-      description: "Optional context for transcription. An empty value uses a language-neutral list of technical keywords, so automatic language detection can keep the spoken language. When entering custom prose, write it in the language of the recording; do not use an English sample for multilingual dictation. More info: https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create"
+      description: "Optional context for transcription. An empty value leaves the prompt unset. When entering custom prose, write it in the language of the recording; do not use an English sample for multilingual dictation. More info: https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create"
 
   # Configuration options for the OpenAI API
   api:

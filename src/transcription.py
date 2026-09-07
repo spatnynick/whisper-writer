@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 def _initial_prompt():
-    """Return the configured prompt, or the schema default for older empty configs."""
+    """Return the configured prompt, or ``None`` when no prompt is configured."""
     model_options = ConfigManager.get_config_section('model_options')
     common_options = model_options.get('common', {}) if isinstance(model_options, dict) else {}
     configured = common_options.get('initial_prompt') if isinstance(common_options, dict) else None

@@ -112,6 +112,27 @@ On first run, a Settings window should appear. After saving, WhisperWriter resta
 
 WhisperWriter uses a configuration file to customize its behaviour. Settings is organized into Transcription, Recording, Text output, General and About tabs. Related controls are grouped together; the tabs scroll when the window is small. Save applies changes, while Discard changes restores the saved values. Escape discards edits and closes Settings.
 
+#### Optional Git synchronization
+
+The Synchronization tab can synchronize selected settings through a separate Git repository. The
+normal configuration remains one local YAML file; WhisperWriter stores a managed clone under the
+user configuration directory (`~/.config/whisper-writer/sync/repository` on Linux or
+`%APPDATA%\\WhisperWriter\\sync\\repository` on Windows) and writes only the selected areas to
+`whisperwriter-sync.yaml`. Prompt context, provider settings, hotkeys, recording, audio, local
+model, text output and interface settings can each be enabled or disabled independently. API keys
+and other secrets are never synchronized.
+
+Enter the remote repository URL and use **Test connection and refresh branches** to discover and
+select a branch. Git is detected automatically on PATH, with an optional executable-path override.
+Git authentication can use the existing Git credential helper/SSH agent, an HTTPS username and
+token/password, or an SSH private key. Authentication values remain local to the machine.
+
+Save can push selected changes automatically, and a free-form interval in minutes can check for
+changes periodically. Synchronization is paused during recording and transcription. Pull applies
+the selected remote areas and restarts WhisperWriter only after the operation succeeds. Errors are
+shown in the Synchronization tab and marked on the idle tray icon; no synchronization error popup
+or desktop notification is displayed.
+
 The tray's Update action checks the current branch on `origin`. Finish dictation before updating; updates also refuse to start while a retry is available. New recordings are disabled during installation. Every successful update automatically restarts the app so the new code and dependencies are loaded; failed updates are reported without restarting. You can also run `./update.sh` from a terminal.
 
 #### Model Options
@@ -119,7 +140,7 @@ The tray's Update action checks the current branch on `origin`. Finish dictation
 - `common`: Options common to both API and local models.
   - `language`: Optional input language in [ISO-639-1 format](https://en.wikipedia.org/wiki/List_of_ISO_639_language_codes). Leave it empty to detect the spoken language automatically; transcription stays in that input language. (Default: `null`)
   - `temperature`: Controls the randomness of the transcription output. Lower values make the output more focused and deterministic. (Default: `0.0`)
-  - `initial_prompt`: Optional context used to condition the transcription. An empty setting uses a language-neutral comma-separated technical keyword list, which preserves automatic language detection. For multilingual dictation, leave it empty or use keywords/proper names; custom prose should be written in the recording language. OpenAI documents that the prompt should match the audio language. See the [transcription API reference](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create).
+  - `initial_prompt`: Optional context used to condition the transcription. An empty setting leaves the prompt unset. For multilingual dictation, leave it empty or use keywords/proper names; custom prose should be written in the recording language. OpenAI documents that the prompt should match the audio language. See the [transcription API reference](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create).
 
 - `api`: Configuration options for the OpenAI API. See the [OpenAI transcription API reference](https://developers.openai.com/api/reference/python/resources/audio/subresources/transcriptions/methods/create) for more information.
   - `base_url`: The base URL for an OpenAI-compatible API. The Settings window can load models from its `/models` endpoint. (Default: `https://api.openai.com/v1`)

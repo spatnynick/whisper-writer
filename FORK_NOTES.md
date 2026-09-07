@@ -43,11 +43,10 @@ held activation switches to the configured secondary model. Model ids with an `.
 English-only, so choose a multilingual model yourself when needed; the app does not substitute
 models based on detected language.
 The common initial prompt is a wide multi-line editor with the clickable OpenAI speech-to-text
-guide below it. An empty prompt uses the tracked language-neutral technical keyword default;
-this avoids steering automatic language detection toward English. Custom prose should match the
-recording language.
-The previous built-in English sample is recognized and migrated at runtime for existing
-ignored configurations.
+guide below it. An empty prompt remains empty; prompt context will be supplied through the
+settings synchronization feature. Custom prose should match the recording language.
+Previous built-in prompt values are recognized and cleared at runtime for existing ignored
+configurations.
 Requests are not retried automatically. Exit/settings restart waits for active worker work
 without blocking Qt; a native model call still has to finish. Complete dictation before an
 external process restart/update, which terminates in-flight work.
@@ -206,7 +205,7 @@ model_options:
     model: deepdml/faster-whisper-large-v3-turbo-ct2
     secondary_model: null
   common:
-    initial_prompt: null  # uses the built-in language-neutral keyword prompt when empty
+    initial_prompt: null  # no implicit prompt when empty
     language: null
     temperature: 0.0
   local:
@@ -473,13 +472,12 @@ instance decorated by QtCore.pyqtSlot` immediately at startup.
 
 `src/glossary.yaml` holds a domain term list (SAP modules, ABAP dev/transaction codes,
 SAP Basis/HANA, Linux server admin) plus a static mishear→correction map and a fuzzy-match
-config. Tracked in git (unlike `config.yaml`, which is gitignored/per-machine) so it syncs
-across all three machines on `git pull` — no per-machine setup needed.
+config. The glossary is used for post-transcription correction only; it is not an implicit
+Whisper prompt and does not supply a default when `initial_prompt` is empty.
 
 `src/glossary.py` loads it (module-level cache) and exposes:
-- `build_initial_prompt()` — flattens language-neutral glossary tokens into a comma-joined
-  string, omitting generic multi-word English phrases, and caps it at 800 chars (Whisper's
-  `initial_prompt`/API `prompt` has a practical token limit; cap client-side instead).
+- `normalize_initial_prompt()` — returns explicitly configured context, or `None` when the
+  setting is empty; previous built-in prompt values are cleared during migration.
 - `apply_glossary_corrections(text)` — runs after every transcription, in
   `post_process_transcription()` (`src/transcription.py`). Two passes:
   1. `static_map`: unconditional case-insensitive phrase replace (e.g. `"eye dock"` →
@@ -503,9 +501,9 @@ one edit of some glossary term and isn't a trigger could still misfire) — miti
 gating on triggers in the first place and keeping the threshold at 0.90, not lower.
 
 Config path if you want a per-machine override: `model_options.common.initial_prompt` in
-`config.yaml` still exists and takes precedence over the built-in keyword default when non-empty.
-For automatic multilingual detection, use keywords or proper names rather than prose in one
-language; the OpenAI transcription API requires a prose prompt to match the audio language.
+`config.yaml`. When it is empty, no prompt is sent to the transcription backend. For automatic
+multilingual detection, use keywords or proper names rather than prose in one language; the
+OpenAI transcription API requires a prose prompt to match the audio language.
 
 Requires `rapidfuzz` (prebuilt wheel, no apt dep — added to `requirements.txt`).
 

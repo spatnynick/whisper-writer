@@ -13,13 +13,14 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 import numpy as np
 from PyQt5.QtCore import QObject, QThread, Qt, QTimer, QProcess, QPoint
-from PyQt5.QtWidgets import QApplication, QComboBox, QLabel, QLineEdit, QPushButton, QTextEdit, QWidget, QGroupBox, QSystemTrayIcon
+from PyQt5.QtWidgets import QApplication, QCheckBox, QComboBox, QLabel, QLineEdit, QPushButton, QTextEdit, QWidget, QGroupBox, QSystemTrayIcon
 from utils import ConfigManager
 from result_thread import ResultThread
 from main import WhisperWriterApp
 from input_simulation import InputSimulator
 import transcription
 from ui.settings_window import SettingsWindow
+from config_sync import default_sync_settings
 
 APP = QApplication.instance() or QApplication([])
 
@@ -55,6 +56,14 @@ class ReliabilityTests(unittest.TestCase):
         app._model_hold_timer.setSingleShot(True)
         app._model_hold_timer.setInterval(app.MODEL_SWITCH_HOLD_MS)
         app._model_hold_timer.timeout.connect(app._on_model_hold)
+        app._sync_worker = None
+        app._sync_pending_action = None
+        app._sync_pending_settings = None
+        app._sync_restart_after = False
+        app._sync_current_restart_after = False
+        app._sync_settings = default_sync_settings()
+        app._sync_needs_attention = False
+        app._sync_timer = QTimer()
         app.local_model = None
         app.result_thread = None
         app.current_status = 'idle'
@@ -383,9 +392,7 @@ class ReliabilityTests(unittest.TestCase):
             self.assertTrue(secondary_combo.isEditable())
             self.assertEqual(settings.get_widget_value_typed(model_container, 'str'), 'whisper-1')
             self.assertIsNone(settings.get_widget_value_typed(secondary_container, 'str'))
-            self.assertIn('SAP', settings.get_widget_value_typed(prompt, 'str'))
-            self.assertIn('KDE', settings.get_widget_value_typed(prompt, 'str'))
-            self.assertNotIn('I am dictating natural messages', settings.get_widget_value_typed(prompt, 'str'))
+            self.assertIsNone(settings.get_widget_value_typed(prompt, 'str'))
             self.assertTrue(prompt_link.openExternalLinks())
             self.assertIn('https://developers.openai.com/api/docs/guides/speech-to-text', prompt_link.text())
             self.assertGreater(prompt.mapTo(settings, QPoint()).y(), settings.height() // 3)
@@ -403,6 +410,41 @@ class ReliabilityTests(unittest.TestCase):
         finally:
             settings.reset_settings()
             settings.close()
+
+    def test_sync_tab_exposes_selective_controls_and_free_form_interval(self):
+        settings = SettingsWindow()
+        try:
+            branch = settings.findChild(QComboBox, 'sync_branch_input')
+            interval = settings.findChild(QLineEdit, 'sync_interval_minutes_input')
+            auth_type = settings.findChild(QComboBox, 'sync_auth_type_input')
+            test_button = settings.findChild(QPushButton, 'sync_test_connection')
+            prompt_area = settings.findChild(QCheckBox, 'sync_area_prompt_context_input')
+            hotkeys_area = settings.findChild(QCheckBox, 'sync_area_hotkeys_input')
+            self.assertIsNotNone(branch)
+            self.assertFalse(branch.isEditable())
+            self.assertIsNotNone(interval)
+            self.assertIsNotNone(auth_type)
+            self.assertIsNotNone(test_button)
+            self.assertIsNotNone(prompt_area)
+            self.assertIsNotNone(hotkeys_area)
+            interval.setText('37')
+            values = settings.collect_sync_values()
+            self.assertEqual(values['interval_minutes'], 37)
+            self.assertIn(values['auth']['type'], ('system', 'https', 'ssh'))
+        finally:
+            settings.reset_settings()
+            settings.close()
+
+    def test_sync_is_queued_while_recording(self):
+        app = self.app()
+        app.result_thread = Mock()
+        app.current_status = 'recording'
+        sync_settings = default_sync_settings()
+        sync_settings['enabled'] = True
+        with patch.object(app, '_set_sync_status') as status:
+            app.request_sync('auto', settings=sync_settings)
+        self.assertEqual(app._sync_pending_action, 'auto')
+        status.assert_called_once_with('Paused until idle', persist=False)
 
     def test_model_discovery_extracts_openai_and_local_shapes(self):
         self.assertEqual(
@@ -456,33 +498,22 @@ class ReliabilityTests(unittest.TestCase):
             settings.reset_settings()
             settings.close()
 
-    def test_empty_initial_prompt_uses_schema_default(self):
+    def test_empty_initial_prompt_is_unset(self):
         ConfigManager.set_config_value(None, 'model_options', 'common', 'initial_prompt')
-        default_prompt = transcription._initial_prompt()
-        self.assertIn('SAP', default_prompt)
-        self.assertIn('ABAP', default_prompt)
-        self.assertIn('systemd', default_prompt)
-        self.assertIn('KDE', default_prompt)
-        self.assertNotIn('I am dictating natural messages', default_prompt)
-        self.assertNotIn('transaction', default_prompt.lower())
-        self.assertNotIn('user exit', default_prompt.lower())
-        self.assertNotIn('Python function', default_prompt)
-        self.assertNotIn('JavaScript handler', default_prompt)
-        self.assertNotIn('JSON over HTTPS', default_prompt)
+        self.assertIsNone(transcription._initial_prompt())
         ConfigManager.set_config_value('my custom vocabulary', 'model_options', 'common', 'initial_prompt')
         self.assertEqual(transcription._initial_prompt(), 'my custom vocabulary')
 
-    def test_legacy_english_prompt_is_migrated_to_keyword_context(self):
+    def test_legacy_english_prompt_is_cleared(self):
         ConfigManager.set_config_value(
             'I am dictating natural messages about customer projects, SAP consulting, '
             'ABAP programming, Linux administration, and technical support. Preserve capitalization.',
             'model_options', 'common', 'initial_prompt',
         )
         prompt = transcription._initial_prompt()
-        self.assertIn('SAP', prompt)
-        self.assertNotIn('I am dictating natural messages', prompt)
+        self.assertIsNone(prompt)
 
-    def test_api_prompt_is_keyword_context_when_language_is_automatic(self):
+    def test_api_prompt_is_empty_when_unconfigured(self):
         ConfigManager.set_config_value(True, 'model_options', 'use_api')
         ConfigManager.set_config_value(None, 'model_options', 'common', 'language')
         ConfigManager.set_config_value(None, 'model_options', 'common', 'initial_prompt')
@@ -491,8 +522,7 @@ class ReliabilityTests(unittest.TestCase):
             transcription.transcribe_api(np.zeros(1600, dtype=np.int16))
             request = client.return_value.__enter__.return_value.audio.transcriptions.create.call_args.kwargs
         self.assertIsNone(request['language'])
-        self.assertIn('SAP', request['prompt'])
-        self.assertNotIn('I am dictating natural messages', request['prompt'])
+        self.assertIsNone(request['prompt'])
 
     def test_settings_refreshes_models_from_configured_endpoint(self):
         calls = []

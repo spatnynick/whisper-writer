@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 ### Added
+- Optional Git synchronization for independently selected configuration areas, with automatic
+  branch discovery, background push/pull, interval checks, local Git authentication settings and
+  idle tray error marking.
 - New settings window to configure WhisperWriter.
 - New main window to either start the keyboard listener or open the settings window.
 - New continuous recording mode ([Issue #40](https://github.com/savbell/whisper-writer/issues/40)).
@@ -15,11 +18,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Tray double-click toggles Settings, and the API model selectors plus refresh controls are grouped in a dedicated box.
 
 ### Changed
+- Empty `initial_prompt` values no longer receive an implicit glossary/default prompt; prompt
+  context is now explicitly configured and can be supplied later by settings synchronization.
 - Migrated status window from using `tkinter` to `PyQt5`.
 - Migrated from using JSON to using YAML to store configuration settings.
 - Upgraded to latest versions of `openai` and `faster-whisper`, including support for local API ([Issue #32](https://github.com/savbell/whisper-writer/issues/32)).
 - API model selectors preserve the last selected values after model-list refresh and when Settings is reopened; the active model is shown during recording and transcription.
-- The initial prompt has a built-in technical-dictation default for empty configurations, with a wide editor and the current OpenAI speech-to-text guide below it.
+- The initial prompt remains empty unless explicitly configured, with a wide editor and the current OpenAI speech-to-text guide below it.
 
 ### Removed
 - No longer using `keyboard` package to listen for key presses.

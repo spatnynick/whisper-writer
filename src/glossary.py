@@ -5,21 +5,14 @@ import yaml
 from rapidfuzz import fuzz
 
 _GLOSSARY = None
-_INITIAL_PROMPT_MAX_CHARS = 800
 
-# These were the built-in English prose prompts used by earlier revisions. Keep a
-# small migration check so an existing ignored config.yaml does not continue to steer
-# multilingual recordings toward English after the default changes to keyword context.
+# These were built-in prompts used by earlier revisions. Treat them as empty during
+# migration so an existing ignored config.yaml does not continue to supply an implicit
+# prompt after the default was removed.
 _LEGACY_DEFAULT_PROMPT_PREFIXES = (
     'I am dictating natural messages about customer projects, software development, and technical support.',
     'I am dictating natural messages about customer projects, SAP consulting, ABAP programming, Linux administration, and technical support.',
 )
-_LANGUAGE_NEUTRAL_LOWERCASE_TERMS = {
-    'systemd', 'systemctl', 'journalctl', 'hdbsql', 'saphostagent', 'sapstartsrv',
-    'sapinst', 'rsyslog', 'crontab', 'kubectl', 'iptables', 'firewalld', 'selinux',
-    'sudo', 'chmod', 'chown', 'rsync', 'tcpdump', 'netstat', 'fstab', 'ext4', 'xfs',
-    'docker', 'kubernetes', 'pacemaker', 'corosync', 'multipath',
-}
 
 
 def _load():
@@ -40,43 +33,14 @@ def _load():
     return _GLOSSARY
 
 
-def build_initial_prompt():
-    """Flatten glossary categories into a language-neutral Whisper keyword prompt."""
-    glossary = _load()
-    terms = []
-    for category_terms in glossary['categories'].values():
-        for term in category_terms:
-            if not isinstance(term, str) or ' ' in term:
-                # Multi-word English phrases are useful for a fixed-language prompt,
-                # but can steer automatic multilingual detection toward English.
-                continue
-            if (
-                term != term.lower()
-                or any(character.isdigit() for character in term)
-                or any(character in term for character in '/-._')
-                or term.lower() in _LANGUAGE_NEUTRAL_LOWERCASE_TERMS
-            ):
-                terms.append(term)
-
-    prompt = ', '.join(terms)
-    if len(prompt) > _INITIAL_PROMPT_MAX_CHARS:
-        prompt = prompt[:_INITIAL_PROMPT_MAX_CHARS].rsplit(',', 1)[0]
-    return prompt
-
-
 def normalize_initial_prompt(prompt):
-    """Return user context, replacing an old built-in English prose default.
-
-    Whisper's prompt is context, rather than a translation instruction. A comma-separated
-    glossary is safer when the input language is detected automatically because it supplies
-    technical spellings without presenting a sample English sentence to continue.
-    """
+    """Return explicitly configured context, or ``None`` when no context is configured."""
     if not isinstance(prompt, str) or not prompt.strip():
-        return build_initial_prompt()
+        return None
 
     normalized = ' '.join(prompt.split())
     if any(normalized.startswith(prefix) for prefix in _LEGACY_DEFAULT_PROMPT_PREFIXES):
-        return build_initial_prompt()
+        return None
     return prompt.strip()
 
 

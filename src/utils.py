@@ -1,9 +1,62 @@
 import yaml
 import os
 import tempfile
+from dotenv import load_dotenv
 
 class ConfigManager:
     _instance = None
+
+    @staticmethod
+    def config_directory():
+        """Return the per-user configuration directory for the current platform."""
+        if os.name == 'nt':
+            base_dir = os.getenv('APPDATA') or os.getenv('LOCALAPPDATA') or os.path.expanduser('~')
+            return os.path.join(base_dir, 'WhisperWriter')
+
+        base_dir = os.getenv('XDG_CONFIG_HOME')
+        if not base_dir:
+            base_dir = os.path.join(os.path.expanduser('~'), '.config')
+        return os.path.join(base_dir, 'whisper-writer')
+
+    @classmethod
+    def config_path(cls):
+        """Return the persistent user configuration path."""
+        return os.path.join(cls.config_directory(), 'config.yaml')
+
+    @classmethod
+    def sync_settings_path(cls):
+        """Return the local-only synchronization settings path."""
+        return os.path.join(cls.config_directory(), 'sync.yaml')
+
+    @classmethod
+    def env_path(cls):
+        """Return the persistent user environment file path."""
+        return os.path.join(cls.config_directory(), '.env')
+
+    @staticmethod
+    def legacy_config_path():
+        """Return the configuration path used by older repository-local releases."""
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.yaml')
+
+    @staticmethod
+    def legacy_env_path():
+        """Return the repository-local environment path used by older releases."""
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        return os.path.join(project_root, '.env')
+
+    @classmethod
+    def ensure_config_directory(cls):
+        directory = cls.config_directory()
+        os.makedirs(directory, exist_ok=True)
+        return directory
+
+    @classmethod
+    def load_environment(cls):
+        """Load user environment values, retaining compatibility with the old root .env."""
+        # Explicit process environment values win over files. Load the new location first so
+        # the legacy file cannot override a migrated user value.
+        load_dotenv(cls.env_path(), override=False)
+        load_dotenv(cls.legacy_env_path(), override=False)
 
     def __init__(self):
         """Initialize the ConfigManager instance."""
@@ -17,6 +70,7 @@ class ConfigManager:
             cls._instance = cls()
             cls._instance.schema = cls._instance.load_config_schema(schema_path)
             cls._instance.config = cls._instance.load_default_config()
+            cls.load_environment()
             cls._instance.load_user_config()
 
     @classmethod
@@ -95,7 +149,7 @@ class ConfigManager:
             config[category] = extract_value(settings)
         return config
 
-    def load_user_config(self, config_path=os.path.join('src', 'config.yaml')):
+    def load_user_config(self, config_path=None):
         """Load user configuration and merge with default config."""
         def deep_update(source, overrides):
             for key, value in overrides.items():
@@ -109,6 +163,13 @@ class ConfigManager:
                 elif not isinstance(value, (dict, list)):
                     source[key] = value
 
+        if config_path is None:
+            config_path = self.config_path()
+            if not os.path.isfile(config_path):
+                # Keep existing installations working until the next successful save moves
+                # their configuration into the platform-specific user directory.
+                config_path = self.legacy_config_path()
+
         if config_path and os.path.isfile(config_path):
             try:
                 with open(config_path, 'r', encoding='utf-8-sig') as file:
@@ -121,11 +182,14 @@ class ConfigManager:
                 print("Error in configuration file. Using default configuration.")
 
     @classmethod
-    def save_config(cls, config_path=os.path.join('src', 'config.yaml')):
+    def save_config(cls, config_path=None):
         """Save the current configuration to a YAML file."""
         if cls._instance is None:
             raise RuntimeError("ConfigManager not initialized")
+        if config_path is None:
+            config_path = cls.config_path()
         directory = os.path.dirname(os.path.abspath(config_path))
+        os.makedirs(directory, exist_ok=True)
         temporary_path = None
         try:
             with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=directory,
@@ -147,13 +211,20 @@ class ConfigManager:
         if cls._instance is None:
             raise RuntimeError("ConfigManager not initialized")
         cls._instance.config = cls._instance.load_default_config()
+        cls.load_environment()
         cls._instance.load_user_config()
+
+    @classmethod
+    def replace_config(cls, config):
+        """Replace the in-memory configuration after an external synchronized update."""
+        if cls._instance is None:
+            raise RuntimeError("ConfigManager not initialized")
+        cls._instance.config = config
 
     @classmethod
     def config_file_exists(cls):
         """Check if a valid config file exists."""
-        config_path = os.path.join('src', 'config.yaml')
-        return os.path.isfile(config_path)
+        return os.path.isfile(cls.config_path()) or os.path.isfile(cls.legacy_config_path())
 
     @classmethod
     def console_print(cls, message):
