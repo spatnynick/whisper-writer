@@ -18,6 +18,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Tray double-click toggles Settings, and the API model selectors plus refresh controls are grouped in a dedicated box.
 
 ### Changed
+- Increased Settings height for the synchronization controls; moved branch testing into Git
+  authentication; enabled all synchronization areas by default; set the default interval to 15
+  minutes; and display sync times in the user's local format.
+- Persisted discovered branches and local sync preferences before manual Pull without pushing.
+  New clients always pull a non-empty remote before any push, and scheduled synchronization stays
+  paused while recording or transcribing.
 - Empty `initial_prompt` values no longer receive an implicit glossary/default prompt; prompt
   context is now explicitly configured and can be supplied later by settings synchronization.
 - Migrated status window from using `tkinter` to `PyQt5`.

@@ -1,3 +1,4 @@
+import copy
 import os
 import sys
 import logging
@@ -16,7 +17,25 @@ from ui.status_window import StatusWindow
 from transcription import create_local_model
 from input_simulation import InputSimulator
 from utils import ConfigManager
-from config_sync import SyncWorker, load_sync_settings, save_sync_settings, selected_areas
+from config_sync import (
+    SYNC_STATUS_CHECKING_SYNCHRONIZATION,
+    SYNC_STATUS_CONNECTION_SUCCESSFUL,
+    SYNC_STATUS_DISABLED,
+    SYNC_STATUS_ERROR,
+    SYNC_STATUS_NO_AREAS_SELECTED,
+    SYNC_STATUS_NOT_IN_SYNC,
+    SYNC_STATUS_PAUSED_UNTIL_IDLE,
+    SYNC_STATUS_PULLING_SETTINGS,
+    SYNC_STATUS_PUSH_PENDING,
+    SYNC_STATUS_PUSHING_SETTINGS,
+    SYNC_STATUS_SYNCHRONIZING,
+    SYNC_STATUS_TESTING_CONNECTION,
+    SYNC_STATUS_UP_TO_DATE,
+    SyncWorker,
+    load_sync_settings,
+    save_sync_settings,
+    selected_areas,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -69,7 +88,11 @@ class WhisperWriterApp(QObject):
         self._sync_pending_action = None
         self._sync_pending_settings = None
         self._sync_restart_after = False
+        self._sync_pending_restart_notice = False
         self._sync_current_restart_after = False
+        self._sync_current_restart_notice = False
+        self._sync_current_settings = None
+        self._sync_current_succeeded = False
         self._sync_settings = None
         self._sync_needs_attention = False
         self._sync_timer = QTimer(self)
@@ -79,7 +102,7 @@ class WhisperWriterApp(QObject):
         self.cancelRequested.connect(self.on_cancel_key, Qt.QueuedConnection)
         ConfigManager.initialize()
         self._sync_settings = load_sync_settings()
-        self._sync_needs_attention = self._sync_settings.get('status') == 'Error'
+        self._sync_needs_attention = self._sync_settings.get('status') == SYNC_STATUS_ERROR
 
         self.settings_window = SettingsWindow()
         self.settings_window.settings_closed.connect(self.on_settings_closed)
@@ -255,16 +278,22 @@ class WhisperWriterApp(QObject):
         settings['status'] = status
         if error is not None:
             settings['last_error'] = error
-        if status in ('Up to date', 'Connection successful'):
+        if status in (SYNC_STATUS_UP_TO_DATE, SYNC_STATUS_CONNECTION_SUCCESSFUL):
             settings['last_error'] = ''
         if remote_commit:
             settings['last_remote_commit'] = remote_commit
         if persist:
-            if status in ('Up to date', 'Connection successful'):
-                settings['last_success'] = datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')
+            if status == SYNC_STATUS_UP_TO_DATE:
+                # Keep the persisted value unambiguous; the Settings UI formats it with the
+                # user's current locale when it is displayed.
+                settings['last_success'] = datetime.now().astimezone().isoformat(timespec='seconds')
             settings = save_sync_settings(settings)
         self._sync_settings = settings
-        self._sync_needs_attention = status in ('Error', 'Not in sync', 'Push pending')
+        self._sync_needs_attention = status in (
+            SYNC_STATUS_ERROR,
+            SYNC_STATUS_NOT_IN_SYNC,
+            SYNC_STATUS_PUSH_PENDING,
+        )
         if getattr(self, 'settings_window', None):
             self.settings_window.update_sync_status(settings)
         if getattr(self, 'tray_icon', None):
@@ -287,44 +316,59 @@ class WhisperWriterApp(QObject):
     def _on_sync_timer(self):
         settings = load_sync_settings()
         if settings.get('enabled') and settings.get('interval_minutes', 0) > 0:
+            if self._sync_is_busy():
+                # Do not let a recurring timer start Git work while recording or transcribing.
+                # Keep one automatic check queued; it will run after the worker returns to idle.
+                self._sync_timer.stop()
             self.request_sync('auto', settings=settings)
-            self._configure_sync_timer()
+            if not self._sync_is_busy():
+                self._configure_sync_timer()
 
-    def _queue_sync(self, action, settings, restart_after=False):
+    def _queue_sync(self, action, settings, restart_after=False, restart_notice=False):
         """Remember one sync operation until the current worker/recording is finished."""
         if self._sync_pending_action is None or action != 'auto':
             self._sync_pending_action = action
             self._sync_pending_settings = settings
         self._sync_restart_after = self._sync_restart_after or restart_after
+        self._sync_pending_restart_notice = (
+            getattr(self, '_sync_pending_restart_notice', False) or restart_notice
+        )
 
-    def request_sync(self, action, settings=None, restart_after=False):
+    def request_sync(self, action, settings=None, restart_after=False, restart_notice=False):
         """Start or queue a synchronization operation without blocking the GUI."""
         settings = settings or load_sync_settings()
         if action != 'test' and not settings.get('enabled'):
-            self._set_sync_status('Disabled', persist=False)
+            self._set_sync_status(SYNC_STATUS_DISABLED, persist=False)
             return
         if action != 'test' and not selected_areas(settings):
-            self._set_sync_status('No areas selected', persist=False)
+            self._set_sync_status(SYNC_STATUS_NO_AREAS_SELECTED, persist=False)
             return
 
         if getattr(self, '_sync_worker', None) is not None:
-            self._queue_sync(action, settings, restart_after)
+            self._queue_sync(action, settings, restart_after, restart_notice)
             return
         if self._sync_is_busy():
-            self._queue_sync(action, settings, restart_after)
-            self._set_sync_status('Paused until idle', persist=False)
+            self._queue_sync(action, settings, restart_after, restart_notice)
+            self._set_sync_status(SYNC_STATUS_PAUSED_UNTIL_IDLE, persist=False)
             return
         if getattr(self, '_shutdown_action', None) or getattr(self, '_update_phase', None) == 'updating':
-            self._queue_sync(action, settings, restart_after)
+            self._queue_sync(action, settings, restart_after, restart_notice)
             return
 
-        self._start_sync_worker(action, settings, restart_after)
+        self._start_sync_worker(action, settings, restart_after, restart_notice)
 
-    def _start_sync_worker(self, action, settings, restart_after=False):
-        labels = {'test': 'Testing connection', 'push': 'Pushing settings',
-                  'pull': 'Pulling settings', 'auto': 'Checking synchronization'}
+    def _start_sync_worker(self, action, settings, restart_after=False, restart_notice=False):
+        labels = {
+            'test': SYNC_STATUS_TESTING_CONNECTION,
+            'push': SYNC_STATUS_PUSHING_SETTINGS,
+            'pull': SYNC_STATUS_PULLING_SETTINGS,
+            'auto': SYNC_STATUS_CHECKING_SYNCHRONIZATION,
+        }
         self._sync_current_restart_after = restart_after
-        self._set_sync_status(labels.get(action, 'Synchronizing'), persist=False)
+        self._sync_current_restart_notice = restart_notice
+        self._sync_current_settings = copy.deepcopy(settings)
+        self._sync_current_succeeded = False
+        self._set_sync_status(labels.get(action, SYNC_STATUS_SYNCHRONIZING), persist=False)
         worker = SyncWorker(
             action,
             settings,
@@ -338,48 +382,105 @@ class WhisperWriterApp(QObject):
         self._sync_worker = worker
         worker.start()
 
+    def _persist_sync_operation_metadata(self, result, operation_settings=None):
+        """Persist local sync preferences and safe metadata returned by a Git operation."""
+        settings = load_sync_settings()
+        operation_settings = operation_settings or getattr(self, '_sync_current_settings', None)
+        if isinstance(operation_settings, dict):
+            for key in (
+                'enabled', 'repository_url', 'branch', 'git_path', 'push_on_save',
+                'interval_minutes', 'areas', 'auth',
+            ):
+                if key in operation_settings:
+                    settings[key] = copy.deepcopy(operation_settings[key])
+        if isinstance(result, dict):
+            if result.get('branch'):
+                settings['branch'] = result['branch']
+            if result.get('git_path'):
+                settings['git_path'] = result['git_path']
+            if result.get('initial_sync_completed'):
+                settings['initial_sync_completed'] = True
+            if result.get('remote_commit'):
+                settings['last_remote_commit'] = result['remote_commit']
+        self._sync_settings = save_sync_settings(settings)
+        self._configure_sync_timer()
+        return self._sync_settings
+
     def _on_sync_completed(self, result):
         """Handle a worker result on the GUI thread."""
         action = result.get('action') if isinstance(result, dict) else None
         remote_commit = result.get('remote_commit', '') if isinstance(result, dict) else ''
         try:
             if action == 'test':
-                settings = load_sync_settings()
+                operation_settings = getattr(self, '_sync_current_settings', None)
+                persisted = self._persist_sync_operation_metadata(result, operation_settings)
                 self.settings_window.update_sync_branches(
-                    result.get('branches', []), result.get('branch') or result.get('default_branch')
+                    result.get('branches', []),
+                    result.get('branch') or result.get('default_branch'),
+                    empty=result.get('empty', False),
                 )
-                self._set_sync_status('Connection successful', remote_commit=remote_commit, persist=True)
+                tested_settings = copy.deepcopy(operation_settings or persisted)
+                tested_settings['branch'] = (
+                    result.get('branch')
+                    or result.get('default_branch')
+                    or tested_settings.get('branch', '')
+                )
+                tested_settings['git_path'] = result.get('git_path') or tested_settings.get('git_path', '')
+                self.settings_window.mark_sync_test_success(tested_settings)
+                self._set_sync_status(
+                    SYNC_STATUS_CONNECTION_SUCCESSFUL,
+                    remote_commit=remote_commit,
+                    persist=True,
+                )
+                self._sync_current_succeeded = True
                 return
 
-            if action == 'pull' and result.get('changed'):
-                old_config = getattr(getattr(ConfigManager, '_instance', None), 'config', None)
-                ConfigManager.replace_config(result['config'])
-                try:
-                    ConfigManager.save_config()
-                except Exception:
-                    if old_config is not None:
-                        ConfigManager.replace_config(old_config)
-                    raise
-                if getattr(self, 'settings_window', None):
-                    self.settings_window.update_widgets_from_config()
-                    self.settings_window.baseline_values = self.settings_window.collect_current_values()
-                self._sync_current_restart_after = True
+            if action == 'pull':
+                if result.get('changed'):
+                    old_config = getattr(getattr(ConfigManager, '_instance', None), 'config', None)
+                    ConfigManager.replace_config(result['config'])
+                    try:
+                        ConfigManager.save_config()
+                    except Exception:
+                        if old_config is not None:
+                            ConfigManager.replace_config(old_config)
+                        raise
+                    if getattr(self, 'settings_window', None):
+                        self.settings_window.update_widgets_from_config()
+                        self.settings_window.baseline_values = self.settings_window.collect_current_values()
+                    self._sync_current_restart_after = True
+                elif getattr(self, '_sync_current_restart_notice', False):
+                    # A manual Pull only needs a restart when it actually changed the
+                    # application configuration. The save-triggered first sync keeps its
+                    # original restart request so a first-run app still initializes.
+                    self._sync_current_restart_after = False
+
+            if action != 'auto' or result.get('initial_sync_completed'):
+                self._persist_sync_operation_metadata(result)
 
             # A no-op interval check must not rewrite the local status file.  This keeps the
             # managed synchronization directory completely quiet when neither side changed;
             # successful operations that changed something (or clear a prior error) still
             # persist their status normally.
             previous_settings = load_sync_settings()
-            persist_success = bool(result.get('changed')) or action == 'test' or bool(
-                previous_settings.get('last_error')
+            persist_success = (
+                bool(result.get('changed'))
+                or action in ('test', 'pull', 'push')
+                or bool(previous_settings.get('last_error'))
             )
-            self._set_sync_status('Up to date', remote_commit=remote_commit, persist=persist_success)
+            self._set_sync_status(
+                SYNC_STATUS_UP_TO_DATE,
+                remote_commit=remote_commit,
+                persist=persist_success,
+            )
+            self._sync_current_succeeded = True
         except Exception as error:
             self._on_sync_failed(str(error))
 
     def _on_sync_failed(self, error):
         logger.warning('Synchronization failed: %s', error)
-        self._set_sync_status('Error', error=error, persist=True)
+        self._sync_current_succeeded = False
+        self._set_sync_status(SYNC_STATUS_ERROR, error=error, persist=True)
 
     def _on_sync_worker_finished(self):
         worker = getattr(self, '_sync_worker', None)
@@ -389,10 +490,21 @@ class WhisperWriterApp(QObject):
 
         restart_after = self._sync_current_restart_after
         self._sync_current_restart_after = False
-        if restart_after:
+        restart_notice = self._sync_current_restart_notice
+        self._sync_current_restart_notice = False
+        operation_succeeded = getattr(self, '_sync_current_succeeded', False)
+        self._sync_current_settings = None
+        self._sync_current_succeeded = False
+        if restart_after and operation_succeeded:
             self._sync_pending_action = None
             self._sync_pending_settings = None
+            self._sync_pending_restart_notice = False
             if not self._shutdown_action:
+                if restart_notice:
+                    self._show_update_message(
+                        'Settings updated',
+                        'Remote settings were applied. The application will now restart to apply them.',
+                    )
                 self._request_shutdown('restart')
             return
 
@@ -410,7 +522,14 @@ class WhisperWriterApp(QObject):
         self._sync_pending_settings = None
         restart_after = self._sync_restart_after
         self._sync_restart_after = False
-        self.request_sync(action, settings=settings, restart_after=restart_after)
+        restart_notice = getattr(self, '_sync_pending_restart_notice', False)
+        self._sync_pending_restart_notice = False
+        self.request_sync(
+            action,
+            settings=settings,
+            restart_after=restart_after,
+            restart_notice=restart_notice,
+        )
 
     def on_sync_settings_saved(self):
         self._sync_settings = load_sync_settings()
@@ -419,30 +538,67 @@ class WhisperWriterApp(QObject):
             self.settings_window.update_sync_status(self._sync_settings)
 
     def on_settings_saved(self):
-        """Push saved settings first when configured, then perform the normal restart."""
+        """Synchronize saved settings safely, then perform the normal restart."""
         settings = load_sync_settings()
-        if settings.get('enabled') and settings.get('push_on_save') and selected_areas(settings):
-            self.request_sync('push', settings=settings, restart_after=True)
+        if settings.get('enabled') and selected_areas(settings):
+            if not settings.get('initial_sync_completed', False):
+                # The first operation decides from the remote state: pull a non-empty
+                # repository, and only bootstrap an empty repository with a push.
+                self.request_sync('auto', settings=settings, restart_after=True)
+            elif settings.get('push_on_save'):
+                self.request_sync('push', settings=settings, restart_after=True)
+            else:
+                self.restart_app()
         else:
             self.restart_app()
 
     def on_settings_saved_live(self):
         self.apply_live_settings()
         settings = load_sync_settings()
-        if settings.get('enabled') and settings.get('push_on_save') and selected_areas(settings):
-            self.request_sync('push', settings=settings)
+        if settings.get('enabled') and selected_areas(settings):
+            if not settings.get('initial_sync_completed', False):
+                self.request_sync('auto', settings=settings)
+            elif settings.get('push_on_save'):
+                self.request_sync('push', settings=settings)
 
     def test_sync_connection(self, settings):
         self.request_sync('test', settings=settings)
 
     def pull_sync_settings(self, settings):
-        # A manual Pull is followed by the normal application restart, even when the selected
-        # values already match locally. Automatic interval pulls restart only when they apply a
-        # changed remote configuration.
-        self.request_sync('pull', settings=settings, restart_after=True)
+        # Save connection preferences before Pull. A manual Pull only restarts when it applies
+        # a changed application configuration; the worker shows the restart notice first.
+        settings = self._save_sync_preferences_before_operation(settings)
+        self.request_sync(
+            'pull',
+            settings=settings,
+            restart_after=True,
+            restart_notice=True,
+        )
 
     def push_sync_settings(self, settings):
-        self.request_sync('push', settings=settings)
+        settings = self._save_sync_preferences_before_operation(settings)
+        if not settings.get('initial_sync_completed', False):
+            # The settings window also uses this signal for "push on save".  On a new
+            # client, make that first operation safe for a non-empty remote as well.
+            self.request_sync('auto', settings=settings)
+        else:
+            self.request_sync('push', settings=settings)
+
+    def _save_sync_preferences_before_operation(self, settings):
+        """Save only local sync preferences before a manual operation; never trigger a push."""
+        persisted = load_sync_settings()
+        for key in (
+            'enabled', 'repository_url', 'branch', 'git_path', 'push_on_save',
+            'interval_minutes', 'areas', 'auth',
+        ):
+            if key in settings:
+                persisted[key] = copy.deepcopy(settings[key])
+        saved = save_sync_settings(persisted)
+        self._sync_settings = saved
+        self._configure_sync_timer()
+        if getattr(self, 'settings_window', None):
+            self.settings_window.update_sync_status(saved)
+        return saved
 
     def _clear_tray_click(self):
         self._tray_click_pending = False
@@ -974,6 +1130,10 @@ class WhisperWriterApp(QObject):
         """
         previous_status = self.current_status
         self.current_status = status
+        if status in ('recording', 'transcribing', 'cancel'):
+            self._sync_timer.stop()
+        elif status == 'idle' and not self._sync_is_busy():
+            self._configure_sync_timer()
         if status != 'recording' and getattr(self, '_model_hold_pending', False):
             self._cancel_model_hold()
         if getattr(self, 'escape_guard', None):

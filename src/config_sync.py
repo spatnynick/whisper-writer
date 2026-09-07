@@ -24,6 +24,23 @@ from utils import ConfigManager
 SYNC_FILE_NAME = 'whisperwriter-sync.yaml'
 SYNC_VERSION = 1
 
+# Keep synchronization state values in one place. They are persisted in sync.yaml and are
+# also used by the Settings UI, so comparisons should not rely on repeated string literals.
+SYNC_STATUS_NOT_CONFIGURED = 'Not configured'
+SYNC_STATUS_CONNECTION_SUCCESSFUL = 'Connection successful'
+SYNC_STATUS_UP_TO_DATE = 'Up to date'
+SYNC_STATUS_ERROR = 'Error'
+SYNC_STATUS_DISABLED = 'Disabled'
+SYNC_STATUS_NO_AREAS_SELECTED = 'No areas selected'
+SYNC_STATUS_PAUSED_UNTIL_IDLE = 'Paused until idle'
+SYNC_STATUS_TESTING_CONNECTION = 'Testing connection'
+SYNC_STATUS_PUSHING_SETTINGS = 'Pushing settings'
+SYNC_STATUS_PULLING_SETTINGS = 'Pulling settings'
+SYNC_STATUS_CHECKING_SYNCHRONIZATION = 'Checking synchronization'
+SYNC_STATUS_SYNCHRONIZING = 'Synchronizing'
+SYNC_STATUS_NOT_IN_SYNC = 'Not in sync'
+SYNC_STATUS_PUSH_PENDING = 'Push pending'
+
 SYNC_AREA_LABELS = {
     'prompt_context': 'Prompt context',
     'provider': 'Provider settings',
@@ -105,8 +122,11 @@ def default_sync_settings():
         # Empty means automatic Git detection.  A non-empty value is an explicit override.
         'git_path': '',
         'push_on_save': True,
-        'interval_minutes': 0,
-        'areas': {area: area == 'prompt_context' for area in SYNC_AREA_PATHS},
+        'interval_minutes': 15,
+        'areas': {area: True for area in SYNC_AREA_PATHS},
+        # A new client must receive an existing remote configuration before it can push.
+        # This is local-only metadata and is never written to the synchronized payload.
+        'initial_sync_completed': False,
         'auth': {
             # system: use Git Credential Manager, credential.helper, SSH agent, etc.
             # https: use the local username/token fields below through GIT_ASKPASS.
@@ -117,7 +137,7 @@ def default_sync_settings():
             'ssh_key_path': '',
             'ssh_passphrase': '',
         },
-        'status': 'Not configured',
+        'status': SYNC_STATUS_NOT_CONFIGURED,
         'last_error': '',
         'last_success': '',
         'last_checked': '',
@@ -131,7 +151,7 @@ def normalize_sync_settings(raw):
     if not isinstance(raw, dict):
         return settings
 
-    for key in ('enabled', 'push_on_save'):
+    for key in ('enabled', 'push_on_save', 'initial_sync_completed'):
         if isinstance(raw.get(key), bool):
             settings[key] = raw[key]
     for key in ('repository_url', 'branch', 'git_path', 'status', 'last_error',
@@ -139,7 +159,9 @@ def normalize_sync_settings(raw):
         if isinstance(raw.get(key), str):
             settings[key] = raw[key]
     try:
-        settings['interval_minutes'] = max(0, int(raw.get('interval_minutes', 0)))
+        settings['interval_minutes'] = max(
+            0, int(raw.get('interval_minutes', settings['interval_minutes']))
+        )
     except (TypeError, ValueError):
         pass
 
@@ -156,6 +178,16 @@ def normalize_sync_settings(raw):
                 settings['auth'][key] = auth[key]
     if settings['auth']['type'] not in ('system', 'https', 'ssh'):
         settings['auth']['type'] = 'system'
+
+    # Older installations have no explicit first-sync marker.  A persisted successful
+    # synchronization with a known remote commit is enough to preserve their established
+    # trust relationship; a mere connection test deliberately is not.
+    if (
+        not isinstance(raw.get('initial_sync_completed'), bool)
+        and raw.get('status') == SYNC_STATUS_UP_TO_DATE
+        and raw.get('last_remote_commit')
+    ):
+        settings['initial_sync_completed'] = True
     return settings
 
 
@@ -169,7 +201,7 @@ def load_sync_settings(path=None):
             return normalize_sync_settings(yaml.safe_load(file))
     except (OSError, yaml.YAMLError):
         settings = default_sync_settings()
-        settings['status'] = 'Error'
+        settings['status'] = SYNC_STATUS_ERROR
         settings['last_error'] = 'The local synchronization settings file could not be read.'
         return settings
 
@@ -456,17 +488,17 @@ class ConfigSyncManager:
                 default_branch = 'main'
             elif 'master' in branches:
                 default_branch = 'master'
-            elif branches:
-                default_branch = branches[0]
-            for line in heads.splitlines():
-                if line.endswith(f'\trefs/heads/{default_branch}'):
-                    head_commit = line.split('\t', 1)[0].strip()
-                    break
+            if default_branch:
+                for line in heads.splitlines():
+                    if line.endswith(f'\trefs/heads/{default_branch}'):
+                        head_commit = line.split('\t', 1)[0].strip()
+                        break
         empty = not branches and not head_commit
         if empty:
-            # An empty remote has no branch for Git to report. Use the conventional branch
-            # name (or an explicitly configured one) so the first push can bootstrap it.
-            default_branch = self.settings.get('branch', '').strip() or 'main'
+            # An empty remote has no branch to detect. Leave the choice to the user; the
+            # editable branch control is enabled after this test so an initial branch can be
+            # entered explicitly.
+            default_branch = self.settings.get('branch', '').strip()
         return {
             'branches': branches,
             'default_branch': default_branch or '',
@@ -479,10 +511,10 @@ class ConfigSyncManager:
         configured = self.settings.get('branch', '').strip()
         if info['branches'] and configured and configured not in info['branches']:
             raise SyncError(f'Configured branch was not found: {configured}')
-        branches = info['branches'] or [info['default_branch']]
         return {
+            'action': 'test',
             'git_path': self.git_path,
-            'branches': branches,
+            'branches': info['branches'],
             'default_branch': info['default_branch'],
             'branch': configured or info['default_branch'],
             'empty': info['empty'],
@@ -584,6 +616,13 @@ class ConfigSyncManager:
         if not areas:
             return {'action': 'push', 'changed': False, 'remote_commit': ''}
         info = self._remote_info()
+        if (info['branches'] or info['head_commit']) and not self.settings.get(
+            'initial_sync_completed', False
+        ):
+            raise SyncError(
+                'This client has not completed its first synchronization. '
+                'Pull the remote settings before pushing.'
+            )
         branch = self._selected_branch(info)
         path = self._ensure_repository(branch, empty_remote=info.get('empty', False))
         local_commit_before = self._local_commit(path)
@@ -614,7 +653,9 @@ class ConfigSyncManager:
         return {
             'action': 'push',
             'changed': local_payload_changed,
+            'branch': branch,
             'remote_commit': remote_commit,
+            'initial_sync_completed': True,
         }
 
     def pull(self, config):
@@ -631,7 +672,9 @@ class ConfigSyncManager:
             'action': 'pull',
             'changed': updated_config != config,
             'config': updated_config,
+            'branch': branch,
             'remote_commit': info['head_commit'],
+            'initial_sync_completed': True,
         }
 
     def auto_sync(self, config, last_remote_commit=''):
@@ -651,9 +694,34 @@ class ConfigSyncManager:
         # the remote branch is fast-forwarded, that file may contain another computer's
         # values, which must be treated as a remote change rather than a local edit.
         local_payload_changed = _payload_with_updates(local_existing, current_payload) != local_existing
-        self._prepare_repository(path, branch, info['head_commit'], 'auto')
+        first_remote_attach = not self.settings.get('initial_sync_completed', False) and bool(
+            info['branches'] or info['head_commit']
+        )
+        self._prepare_repository(
+            path,
+            branch,
+            info['head_commit'],
+            'pull' if first_remote_attach else 'auto',
+        )
 
         existing = _read_sync_payload(str(sync_path))
+
+        # Attaching a new client to a non-empty remote is always a pull, even when the
+        # user enabled "push on save" or an interval check is the first operation.  The
+        # remote configuration is the source of truth until the initial pull completes.
+        if not self.settings.get('initial_sync_completed', False) and (
+            info['branches'] or info['head_commit']
+        ):
+            payload = _read_sync_payload(str(sync_path))
+            updated_config = apply_selected_areas(config, payload, self.settings)
+            return {
+                'action': 'pull',
+                'changed': updated_config != config,
+                'config': updated_config,
+                'branch': branch,
+                'remote_commit': info['head_commit'],
+                'initial_sync_completed': True,
+            }
 
         # A previous commit may have succeeded locally but failed while pushing.  The
         # interval should retry that push rather than treating the local commit as a remote
@@ -668,7 +736,9 @@ class ConfigSyncManager:
             return {
                 'action': 'push',
                 'changed': False,
+                'branch': branch,
                 'remote_commit': self._remote_info()['head_commit'],
+                'initial_sync_completed': True,
             }
 
         if local_payload_changed:
@@ -678,7 +748,9 @@ class ConfigSyncManager:
             return {
                 'action': 'push',
                 'changed': True,
+                'branch': branch,
                 'remote_commit': self._remote_info()['head_commit'],
+                'initial_sync_completed': True,
             }
 
         # The managed clone is updated by _prepare_repository, so its pre-fetch HEAD is the
@@ -694,7 +766,9 @@ class ConfigSyncManager:
             'action': 'pull',
             'changed': updated_config != config,
             'config': updated_config,
+            'branch': branch,
             'remote_commit': info['head_commit'],
+            'initial_sync_completed': True,
         }
 
 

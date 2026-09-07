@@ -15,6 +15,7 @@ from config_sync import (  # noqa: E402
     default_sync_settings,
     export_selected_areas,
     apply_selected_areas,
+    SyncError,
 )
 
 
@@ -45,7 +46,12 @@ class ConfigSyncTests(unittest.TestCase):
     @staticmethod
     def settings(remote):
         settings = default_sync_settings()
-        settings.update(enabled=True, repository_url=str(remote), branch='main')
+        settings.update(
+            enabled=True,
+            repository_url=str(remote),
+            branch='main',
+            initial_sync_completed=True,
+        )
         settings['areas']['prompt_context'] = True
         settings['areas']['provider'] = False
         return settings
@@ -70,10 +76,17 @@ class ConfigSyncTests(unittest.TestCase):
             'misc': {},
         }
 
+    def test_new_sync_defaults_are_safe_and_complete(self):
+        settings = default_sync_settings()
+        self.assertEqual(settings['interval_minutes'], 15)
+        self.assertTrue(all(settings['areas'].values()))
+        self.assertFalse(settings['initial_sync_completed'])
+
     def test_selected_area_projection_excludes_disabled_and_machine_values(self):
         settings = default_sync_settings()
         settings['areas']['prompt_context'] = True
-        settings['areas']['provider'] = False
+        for area in settings['areas']:
+            settings['areas'][area] = area == 'prompt_context'
         config = self.config('portable context')
 
         payload = export_selected_areas(config, settings)
@@ -97,6 +110,7 @@ class ConfigSyncTests(unittest.TestCase):
 
                 self.assertFalse((config_home / 'whisper-writer').exists())
                 connection = manager.test_connection()
+                self.assertEqual(connection['action'], 'test')
                 self.assertEqual(connection['branches'], ['main'])
                 self.assertEqual(connection['default_branch'], 'main')
                 self.assertFalse((config_home / 'whisper-writer').exists())
@@ -144,9 +158,14 @@ class ConfigSyncTests(unittest.TestCase):
 
                 connection = manager.test_connection()
                 self.assertTrue(connection['empty'])
-                self.assertEqual(connection['branches'], ['main'])
-                self.assertEqual(connection['branch'], 'main')
+                self.assertEqual(connection['branches'], [])
+                self.assertEqual(connection['default_branch'], '')
+                self.assertEqual(connection['branch'], '')
 
+                # An empty remote has no detectable branch. The user must choose the
+                # initial branch explicitly before the first bootstrap push.
+                settings['branch'] = 'main'
+                manager = ConfigSyncManager(settings)
                 pushed = manager.push(self.config('initial context'))
                 self.assertTrue(pushed['changed'])
                 remote_head = self.git(
@@ -154,6 +173,45 @@ class ConfigSyncTests(unittest.TestCase):
                 ).stdout.strip()
                 self.assertEqual(pushed['remote_commit'], remote_head)
                 self.assertIn('initial context', (Path(manager.repository_path) / 'whisperwriter-sync.yaml').read_text(encoding='utf-8'))
+
+    def test_non_empty_remote_requires_first_pull_before_push(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_home = root / 'config-home'
+            with patch.dict(os.environ, {'XDG_CONFIG_HOME': str(config_home)}):
+                remote = self.make_remote(root)
+                settings = default_sync_settings()
+                settings.update(enabled=True, repository_url=str(remote), branch='main')
+                manager = ConfigSyncManager(settings)
+                with self.assertRaisesRegex(SyncError, 'Pull the remote settings'):
+                    manager.push(self.config('must not overwrite'))
+
+    def test_first_auto_sync_pulls_a_non_empty_remote(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_home = root / 'config-home'
+            with patch.dict(os.environ, {'XDG_CONFIG_HOME': str(config_home)}):
+                remote = self.make_remote(root)
+                other = root / 'other'
+                self.git(root, 'clone', '-b', 'main', str(remote), str(other))
+                (other / 'whisperwriter-sync.yaml').write_text(
+                    'version: 1\nareas:\n  prompt_context:\n    model_options:\n      common:\n        initial_prompt: remote first\n',
+                    encoding='utf-8',
+                )
+                self.git(other, 'add', 'whisperwriter-sync.yaml')
+                self.git(other, 'commit', '-m', 'remote settings')
+                self.git(other, 'push', 'origin', 'main')
+
+                settings = default_sync_settings()
+                settings.update(enabled=True, repository_url=str(remote), branch='main')
+                manager = ConfigSyncManager(settings)
+                result = manager.auto_sync(self.config('local first'))
+                self.assertEqual(result['action'], 'pull')
+                self.assertTrue(result['initial_sync_completed'])
+                self.assertEqual(
+                    result['config']['model_options']['common']['initial_prompt'],
+                    'remote first',
+                )
 
 
 if __name__ == '__main__':

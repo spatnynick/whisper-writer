@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QMessageBox, QShortcut, QTabWidget, QWidget, QSizePolicy, QSpacerItem, QToolButton, QStyle,
     QFileDialog, QTextEdit, QGroupBox, QScrollArea, QFrame
 )
-from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from PyQt5.QtCore import Qt, QDateTime, QLocale, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QIcon, QKeySequence, QIntValidator
 from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
@@ -19,6 +19,9 @@ from utils import ConfigManager
 import glossary
 from config_sync import (
     SYNC_AREA_LABELS,
+    SYNC_STATUS_CONNECTION_SUCCESSFUL,
+    SYNC_STATUS_NOT_CONFIGURED,
+    SYNC_STATUS_UP_TO_DATE,
     detect_git_path,
     load_sync_settings,
     normalize_sync_settings,
@@ -40,12 +43,15 @@ class SettingsWindow(BaseWindow):
 
     def __init__(self):
         """Initialize the settings window."""
-        super().__init__('Settings', 760, 700, frameless=False)
+        super().__init__('Settings', 760, 840, frameless=False)
         self.main_layout.setContentsMargins(18, 18, 18, 14)
         self.main_layout.setSpacing(14)
         self.setWindowIcon(QIcon(os.path.join('assets', 'ww-logo.png')))
         self.schema = ConfigManager.get_schema()
         self.sync_settings = load_sync_settings()
+        self._last_sync_test_connection = None
+        self._last_sync_discovered_connection = None
+        self._last_sync_discovered_branches = set()
         # Set to True by main.py once the app's other components exist — on a first run
         # (no config.yaml yet) a save must still take the restart path, since that's what
         # actually creates them.
@@ -123,14 +129,14 @@ class SettingsWindow(BaseWindow):
     def create_sync_tab(self):
         """Create local-only Git synchronization settings and status controls."""
         content = QWidget()
+        # Other Settings pages are hosted by a QScrollArea whose viewport paints the normal
+        # window gray. The synchronization page is a direct tab, so explicitly fill it with
+        # the same palette role instead of allowing Qt's tab-pane midtone to show through.
+        content.setAutoFillBackground(True)
         layout = QVBoxLayout(content)
         layout.setContentsMargins(12, 14, 12, 14)
-        layout.setSpacing(12)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setWidget(content)
-        self.tabs.addTab(scroll, 'Synchronization')
+        layout.setSpacing(10)
+        self.tabs.addTab(content, 'Synchronization')
 
         intro = QLabel(
             'Synchronize only the selected settings through a separate Git repository. '
@@ -139,14 +145,52 @@ class SettingsWindow(BaseWindow):
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        connection_group = QGroupBox('Git connection')
+        self.sync_enabled_checkbox = QCheckBox('Enable synchronization', content)
+        self.sync_enabled_checkbox.setObjectName('sync_enabled_input')
+        layout.addWidget(self.sync_enabled_checkbox)
+        actions_group = QGroupBox('Synchronization status')
+        actions_layout = QVBoxLayout(actions_group)
+        actions_layout.setContentsMargins(12, 16, 12, 12)
+        actions_layout.setSpacing(8)
+
+        action_row = QHBoxLayout()
+        self.sync_pull_button = QPushButton('Pull now', actions_group)
+        self.sync_pull_button.setObjectName('sync_pull_now')
+        self.sync_pull_button.setIcon(self.style().standardIcon(QStyle.SP_ArrowDown))
+        self.sync_pull_button.setToolTip('Download synchronized settings from the remote repository')
+        self.sync_pull_button.clicked.connect(self.request_sync_pull)
+        action_row.addWidget(self.sync_pull_button)
+        self.sync_push_button = QPushButton('Push now', actions_group)
+        self.sync_push_button.setObjectName('sync_push_now')
+        self.sync_push_button.setIcon(self.style().standardIcon(QStyle.SP_ArrowUp))
+        self.sync_push_button.setToolTip('Upload selected settings to the remote repository')
+        self.sync_push_button.clicked.connect(self.request_sync_push)
+        action_row.addWidget(self.sync_push_button)
+        actions_layout.addLayout(action_row)
+
+        self.sync_status_label = QLabel(actions_group)
+        self.sync_status_label.setObjectName('sync_status')
+        self.sync_status_label.setWordWrap(True)
+        actions_layout.addWidget(self.sync_status_label)
+        self.sync_error_label = QLabel(actions_group)
+        self.sync_error_label.setObjectName('sync_error')
+        self.sync_error_label.setWordWrap(True)
+        self.sync_error_label.setStyleSheet('color: #c0392b;')
+        actions_layout.addWidget(self.sync_error_label)
+        layout.addWidget(actions_group)
+
+        self.sync_tabs = QTabWidget(content)
+        layout.addWidget(self.sync_tabs, 1)
+
+        git_tab = QWidget(self.sync_tabs)
+        git_layout = QVBoxLayout(git_tab)
+        git_layout.setContentsMargins(8, 10, 8, 8)
+        git_layout.setSpacing(10)
+
+        connection_group = QGroupBox('Git connection', git_tab)
         connection_layout = QVBoxLayout(connection_group)
         connection_layout.setContentsMargins(12, 16, 12, 12)
         connection_layout.setSpacing(10)
-
-        self.sync_enabled_checkbox = QCheckBox('Enable synchronization', connection_group)
-        self.sync_enabled_checkbox.setObjectName('sync_enabled_input')
-        connection_layout.addWidget(self.sync_enabled_checkbox)
 
         self.sync_repository_url_input = QLineEdit(connection_group)
         self.sync_repository_url_input.setObjectName('sync_repository_url_input')
@@ -168,14 +212,15 @@ class SettingsWindow(BaseWindow):
         git_path_layout.addWidget(self.sync_git_path_input, 1)
         git_browse_button = QPushButton('Browse', git_path_container)
         git_browse_button.setObjectName('sync_git_path_browse')
+        git_browse_button.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
         git_browse_button.clicked.connect(self.browse_git_path)
         git_path_layout.addWidget(git_browse_button)
         connection_layout.addWidget(self._sync_labeled_row('Git executable', git_path_container))
 
-        auth_group = QGroupBox('Git authentication')
+        auth_group = QGroupBox('Git authentication', connection_group)
         auth_layout = QVBoxLayout(auth_group)
         auth_layout.setContentsMargins(12, 16, 12, 12)
-        auth_layout.setSpacing(10)
+        auth_layout.setSpacing(8)
         auth_help = QLabel(
             'Authentication values are stored locally and are never copied to the '
             'synchronization repository.'
@@ -212,6 +257,7 @@ class SettingsWindow(BaseWindow):
         ssh_key_layout.addWidget(self.sync_ssh_key_input, 1)
         ssh_key_browse_button = QPushButton('Browse', ssh_key_container)
         ssh_key_browse_button.setObjectName('sync_ssh_key_browse')
+        ssh_key_browse_button.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
         ssh_key_browse_button.clicked.connect(self.browse_ssh_key)
         ssh_key_layout.addWidget(ssh_key_browse_button)
         self.sync_ssh_key_row = self._sync_labeled_row('Private key', ssh_key_container)
@@ -223,10 +269,24 @@ class SettingsWindow(BaseWindow):
         self.sync_ssh_passphrase_input.setPlaceholderText('Optional')
         self.sync_ssh_passphrase_row = self._sync_labeled_row('Key passphrase', self.sync_ssh_passphrase_input)
         auth_layout.addWidget(self.sync_ssh_passphrase_row)
-        connection_layout.addWidget(auth_group)
-        layout.addWidget(connection_group)
 
-        behavior_group = QGroupBox('Automatic synchronization')
+        self.sync_test_button = QPushButton('Test connection and refresh branches', auth_group)
+        self.sync_test_button.setObjectName('sync_test_connection')
+        self.sync_test_button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        self.sync_test_button.setToolTip('Verify Git access and discover the remote branches')
+        self.sync_test_button.clicked.connect(self.request_sync_test)
+        auth_layout.addWidget(self.sync_test_button)
+
+        connection_layout.addWidget(auth_group)
+        git_layout.addWidget(connection_group)
+        git_layout.addStretch(1)
+        self.sync_tabs.addTab(git_tab, 'Git connection')
+
+        automatic_tab = QWidget(self.sync_tabs)
+        automatic_layout = QVBoxLayout(automatic_tab)
+        automatic_layout.setContentsMargins(8, 10, 8, 8)
+        automatic_layout.setSpacing(10)
+        behavior_group = QGroupBox('Automatic synchronization', automatic_tab)
         behavior_layout = QVBoxLayout(behavior_group)
         behavior_layout.setContentsMargins(12, 16, 12, 12)
         behavior_layout.setSpacing(10)
@@ -239,10 +299,17 @@ class SettingsWindow(BaseWindow):
         self.sync_interval_input.setObjectName('sync_interval_minutes_input')
         self.sync_interval_input.setValidator(QIntValidator(0, 525600, self.sync_interval_input))
         self.sync_interval_input.setPlaceholderText('0 = disabled')
+        self.sync_interval_input.setMaximumWidth(110)
         behavior_layout.addWidget(self._sync_labeled_row('Sync interval (minutes)', self.sync_interval_input))
-        layout.addWidget(behavior_group)
+        automatic_layout.addWidget(behavior_group)
+        automatic_layout.addStretch(1)
+        self.sync_tabs.addTab(automatic_tab, 'Automatic synchronization')
 
-        areas_group = QGroupBox('Synchronized areas')
+        areas_tab = QWidget(self.sync_tabs)
+        areas_layout_outer = QVBoxLayout(areas_tab)
+        areas_layout_outer.setContentsMargins(8, 10, 8, 8)
+        areas_layout_outer.setSpacing(10)
+        areas_group = QGroupBox('Synchronized areas', areas_tab)
         areas_layout = QVBoxLayout(areas_group)
         areas_layout.setContentsMargins(12, 16, 12, 12)
         areas_layout.setSpacing(6)
@@ -253,39 +320,11 @@ class SettingsWindow(BaseWindow):
             self.sync_area_checkboxes[area] = checkbox
             areas_layout.addWidget(checkbox)
         areas_layout.addWidget(QLabel('Disabled areas remain local and are not overwritten by Pull.'))
-        layout.addWidget(areas_group)
+        areas_layout_outer.addWidget(areas_group)
+        areas_layout_outer.addStretch(1)
+        self.sync_tabs.addTab(areas_tab, 'Sync areas')
 
-        actions_group = QGroupBox('Synchronization status')
-        actions_layout = QVBoxLayout(actions_group)
-        actions_layout.setContentsMargins(12, 16, 12, 12)
-        actions_layout.setSpacing(8)
-
-        action_row = QHBoxLayout()
-        self.sync_test_button = QPushButton('Test connection and refresh branches', actions_group)
-        self.sync_test_button.setObjectName('sync_test_connection')
-        self.sync_test_button.clicked.connect(self.request_sync_test)
-        action_row.addWidget(self.sync_test_button)
-        self.sync_pull_button = QPushButton('Pull now', actions_group)
-        self.sync_pull_button.setObjectName('sync_pull_now')
-        self.sync_pull_button.clicked.connect(self.request_sync_pull)
-        action_row.addWidget(self.sync_pull_button)
-        self.sync_push_button = QPushButton('Push now', actions_group)
-        self.sync_push_button.setObjectName('sync_push_now')
-        self.sync_push_button.clicked.connect(self.request_sync_push)
-        action_row.addWidget(self.sync_push_button)
-        actions_layout.addLayout(action_row)
-
-        self.sync_status_label = QLabel(actions_group)
-        self.sync_status_label.setObjectName('sync_status')
-        self.sync_status_label.setWordWrap(True)
-        actions_layout.addWidget(self.sync_status_label)
-        self.sync_error_label = QLabel(actions_group)
-        self.sync_error_label.setObjectName('sync_error')
-        self.sync_error_label.setWordWrap(True)
-        self.sync_error_label.setStyleSheet('color: #c0392b;')
-        actions_layout.addWidget(self.sync_error_label)
-        layout.addWidget(actions_group)
-        layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
+        self.sync_enabled_checkbox.stateChanged.connect(self._on_sync_enabled_changed)
 
         self.update_sync_widgets_from_settings()
 
@@ -308,17 +347,35 @@ class SettingsWindow(BaseWindow):
         self.sync_ssh_key_row.setVisible(ssh_visible)
         self.sync_ssh_passphrase_row.setVisible(ssh_visible)
 
+    def _on_sync_enabled_changed(self, state):
+        """Keep the master switch visible while disabling all sync controls beneath it."""
+        enabled = bool(state)
+        if getattr(self, 'sync_tabs', None):
+            self.sync_tabs.setEnabled(enabled)
+        for button in (
+            getattr(self, 'sync_pull_button', None),
+            getattr(self, 'sync_push_button', None),
+        ):
+            if button:
+                button.setEnabled(enabled)
+
     def update_sync_widgets_from_settings(self):
         """Populate synchronization controls without changing their local status baseline."""
         settings = normalize_sync_settings(self.sync_settings)
         self.sync_settings = settings
+        self._last_sync_test_connection = self._persisted_sync_test_connection(settings)
         self.sync_enabled_checkbox.setChecked(settings['enabled'])
         self.sync_repository_url_input.setText(settings['repository_url'])
         self.sync_branch_combo.blockSignals(True)
         self.sync_branch_combo.clear()
         if settings['branch']:
+            self.sync_branch_combo.setEditable(False)
+            self.sync_branch_combo.setPlaceholderText('Test connection to discover branches')
             self.sync_branch_combo.addItem(settings['branch'], settings['branch'])
             self.sync_branch_combo.setCurrentText(settings['branch'])
+        else:
+            self.sync_branch_combo.setEditable(False)
+            self.sync_branch_combo.setPlaceholderText('Test connection to discover branches')
         self.sync_branch_combo.blockSignals(False)
 
         git_path = settings['git_path'] or detect_git_path()
@@ -337,31 +394,135 @@ class SettingsWindow(BaseWindow):
         self.sync_ssh_passphrase_input.setText(auth['ssh_passphrase'])
         self._update_sync_auth_visibility()
         self.update_sync_status(settings)
+        self._on_sync_enabled_changed(self.sync_enabled_checkbox.checkState())
 
-    def update_sync_branches(self, branches, selected=None):
+    def update_sync_branches(self, branches, selected=None, empty=False):
         """Replace the branch drop-down after a successful remote discovery."""
-        selected = selected or self.sync_branch_combo.currentText().strip()
+        branches = [str(branch).strip() for branch in branches if str(branch).strip()]
+        selected = (selected or '').strip()
+        self._last_sync_discovered_branches = set(branches)
         self.sync_branch_combo.blockSignals(True)
         self.sync_branch_combo.clear()
-        for branch in branches:
-            self.sync_branch_combo.addItem(branch, branch)
-        if selected and self.sync_branch_combo.findData(selected) >= 0:
-            self.sync_branch_combo.setCurrentIndex(self.sync_branch_combo.findData(selected))
-        elif branches:
-            self.sync_branch_combo.setCurrentIndex(0)
+        if empty:
+            # An empty remote has no branch to discover. Let the user name the initial
+            # branch explicitly instead of silently inventing or selecting ``main``.
+            self.sync_branch_combo.setEditable(True)
+            self.sync_branch_combo.setPlaceholderText('Enter the initial branch name')
+            self.sync_branch_combo.setEditText(selected)
+        else:
+            self.sync_branch_combo.setEditable(False)
+            self.sync_branch_combo.setPlaceholderText('Select a discovered branch')
+            for branch in branches:
+                self.sync_branch_combo.addItem(branch, branch)
+            if selected and self.sync_branch_combo.findData(selected) >= 0:
+                self.sync_branch_combo.setCurrentIndex(self.sync_branch_combo.findData(selected))
+            else:
+                # Select only conventional names when the remote did not advertise its
+                # default through HEAD. Any other branch must be chosen by the user.
+                known_branch = next((name for name in ('main', 'master') if name in branches), '')
+                if known_branch:
+                    self.sync_branch_combo.setCurrentIndex(self.sync_branch_combo.findData(known_branch))
         self.sync_branch_combo.blockSignals(False)
 
     def update_sync_status(self, settings=None):
         """Show persisted synchronization state without creating a notification."""
         settings = normalize_sync_settings(settings or self.sync_settings)
         self.sync_settings = settings
-        status = settings.get('status') or 'Not configured'
+        status = settings.get('status') or SYNC_STATUS_NOT_CONFIGURED
         self.sync_status_label.setText(f'Status: {status}')
         last_success = settings.get('last_success')
         if last_success:
-            self.sync_status_label.setText(f'Status: {status}\nLast successful sync: {last_success}')
+            formatted_last_success = self._format_sync_timestamp(last_success)
+            self.sync_status_label.setText(
+                f'Status: {status}\nLast successful sync: {formatted_last_success}'
+            )
         error = settings.get('last_error') or ''
         self.sync_error_label.setText(f'Last error: {error}' if error else '')
+
+    @staticmethod
+    def _sync_connection_fingerprint(settings):
+        """Return the connection fields that must remain unchanged after a successful test."""
+        settings = normalize_sync_settings(settings)
+        auth = settings['auth']
+        return (
+            settings['repository_url'],
+            settings['branch'],
+            settings['git_path'] or detect_git_path() or '',
+            auth['type'],
+            auth['username'],
+            auth['secret'],
+            auth['ssh_key_path'],
+            auth['ssh_passphrase'],
+        )
+
+    @staticmethod
+    def _format_sync_timestamp(value):
+        """Format an ISO or legacy sync timestamp using the user's system locale."""
+        if not value:
+            return ''
+
+        timestamp = QDateTime.fromString(value, Qt.ISODate)
+        if not timestamp.isValid():
+            for format_string in ('yyyy-MM-dd HH:mm:ss t', 'yyyy-MM-dd HH:mm:ss'):
+                timestamp = QDateTime.fromString(value, format_string)
+                if timestamp.isValid():
+                    break
+        if timestamp.isValid():
+            return QLocale.system().toString(timestamp.toLocalTime(), QLocale.ShortFormat)
+        return value
+
+    def mark_sync_test_success(self, settings=None):
+        """Remember that the currently displayed connection values passed a Git test."""
+        settings = settings or self.collect_sync_values()
+        self._last_sync_test_connection = self._sync_connection_fingerprint(settings)
+        self._last_sync_discovered_connection = self._sync_connection_without_branch_fingerprint(settings)
+
+    @staticmethod
+    def _sync_connection_without_branch_fingerprint(settings):
+        fingerprint = SettingsWindow._sync_connection_fingerprint(settings)
+        return fingerprint[:1] + fingerprint[2:]
+
+    def _persisted_sync_test_connection(self, settings):
+        settings = normalize_sync_settings(settings)
+        if (
+            settings.get('status') in (SYNC_STATUS_CONNECTION_SUCCESSFUL, SYNC_STATUS_UP_TO_DATE)
+            and settings.get('repository_url')
+            and settings.get('branch')
+        ):
+            return self._sync_connection_fingerprint(settings)
+        return None
+
+    def _sync_validation_error(self, values):
+        """Validate enabled synchronization before the application config is written."""
+        if not values.get('repository_url'):
+            return 'Synchronization requires a repository URL.'
+        if not values.get('branch'):
+            return 'Test the Git connection and select a branch before saving synchronization.'
+        if not any(values.get('areas', {}).values()):
+            return 'Select at least one synchronized area.'
+        if not detect_git_path(values.get('git_path')):
+            return 'Git was not found. Install Git or choose a valid Git executable.'
+
+        auth = values.get('auth', {})
+        if auth.get('type') == 'https' and (not auth.get('username') or not auth.get('secret')):
+            return 'HTTPS authentication requires a username and token/password.'
+        if auth.get('type') == 'ssh':
+            key_path = os.path.expanduser((auth.get('ssh_key_path') or '').strip())
+            if not key_path or not os.path.isfile(key_path):
+                return 'SSH authentication requires an existing private key path.'
+        current_fingerprint = self._sync_connection_fingerprint(values)
+        if self._last_sync_test_connection != current_fingerprint:
+            # If the remote exposes several branches without declaring a HEAD default, the
+            # user may choose one from the freshly discovered list without testing the same
+            # connection a second time. An arbitrary branch name typed for an empty remote
+            # still requires another test.
+            same_connection = (
+                self._last_sync_discovered_connection ==
+                self._sync_connection_without_branch_fingerprint(values)
+            )
+            if not same_connection or values['branch'] not in self._last_sync_discovered_branches:
+                return 'Test the Git connection and refresh branches before saving enabled synchronization.'
+        return None
 
     def request_sync_test(self):
         """Test the values currently shown, including unsaved repository settings."""
@@ -399,10 +560,13 @@ class SettingsWindow(BaseWindow):
             raise ValueError('Sync interval: enter a whole number of minutes.') from None
         if interval < 0:
             raise ValueError('Sync interval: enter zero or a positive number of minutes.')
+        branch = self.sync_branch_combo.currentData()
+        if branch is None:
+            branch = self.sync_branch_combo.currentText().strip()
         return {
             'enabled': self.sync_enabled_checkbox.isChecked(),
             'repository_url': self.sync_repository_url_input.text().strip(),
-            'branch': self.sync_branch_combo.currentText().strip(),
+            'branch': str(branch or '').strip(),
             'git_path': self.sync_git_path_input.text().strip(),
             'push_on_save': self.sync_push_on_save_checkbox.isChecked(),
             'interval_minutes': interval,
@@ -625,11 +789,16 @@ class SettingsWindow(BaseWindow):
         button_row.addStretch(1)
 
         reset_button = QPushButton('Discard changes')
+        reset_button.setObjectName('settings_discard_button')
+        reset_button.setIcon(self.style().standardIcon(QStyle.SP_DialogCancelButton))
         reset_button.setToolTip('Discard unsaved changes and reload the last saved settings')
         reset_button.clicked.connect(self.reset_settings)
         button_row.addWidget(reset_button)
 
         save_button = QPushButton('Save')
+        save_button.setObjectName('settings_save_button')
+        save_button.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
+        save_button.setToolTip('Save settings')
         save_button.clicked.connect(self.save_settings)
         button_row.addWidget(save_button)
 
@@ -781,6 +950,7 @@ class SettingsWindow(BaseWindow):
             layout = QHBoxLayout()
             layout.addWidget(widget)
             browse_button = QPushButton('Browse')
+            browse_button.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
             browse_button.clicked.connect(lambda: self.browse_model_path(widget))
             layout.addWidget(browse_button)
             layout.setContentsMargins(0, 0, 0, 0)
@@ -1013,6 +1183,11 @@ class SettingsWindow(BaseWindow):
         except ValueError as error:
             QMessageBox.warning(self, 'Invalid setting', str(error))
             return
+        if sync_values.get('enabled'):
+            sync_error = self._sync_validation_error(sync_values)
+            if sync_error:
+                QMessageBox.warning(self, 'Invalid synchronization setting', sync_error)
+                return
         changed = self.changed_settings()
         sync_changed = sync_values != self.sync_baseline_values
         if not changed and not sync_changed:

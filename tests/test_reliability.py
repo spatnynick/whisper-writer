@@ -20,7 +20,7 @@ from main import WhisperWriterApp
 from input_simulation import InputSimulator
 import transcription
 from ui.settings_window import SettingsWindow
-from config_sync import default_sync_settings
+from config_sync import SYNC_STATUS_PAUSED_UNTIL_IDLE, default_sync_settings
 
 APP = QApplication.instance() or QApplication([])
 
@@ -60,7 +60,11 @@ class ReliabilityTests(unittest.TestCase):
         app._sync_pending_action = None
         app._sync_pending_settings = None
         app._sync_restart_after = False
+        app._sync_pending_restart_notice = False
         app._sync_current_restart_after = False
+        app._sync_current_restart_notice = False
+        app._sync_current_settings = None
+        app._sync_current_succeeded = False
         app._sync_settings = default_sync_settings()
         app._sync_needs_attention = False
         app._sync_timer = QTimer()
@@ -414,6 +418,8 @@ class ReliabilityTests(unittest.TestCase):
     def test_sync_tab_exposes_selective_controls_and_free_form_interval(self):
         settings = SettingsWindow()
         try:
+            settings.sync_settings = default_sync_settings()
+            settings.update_sync_widgets_from_settings()
             branch = settings.findChild(QComboBox, 'sync_branch_input')
             interval = settings.findChild(QLineEdit, 'sync_interval_minutes_input')
             auth_type = settings.findChild(QComboBox, 'sync_auth_type_input')
@@ -422,11 +428,30 @@ class ReliabilityTests(unittest.TestCase):
             hotkeys_area = settings.findChild(QCheckBox, 'sync_area_hotkeys_input')
             self.assertIsNotNone(branch)
             self.assertFalse(branch.isEditable())
+            self.assertEqual(branch.currentText(), '')
             self.assertIsNotNone(interval)
             self.assertIsNotNone(auth_type)
             self.assertIsNotNone(test_button)
             self.assertIsNotNone(prompt_area)
             self.assertIsNotNone(hotkeys_area)
+            self.assertEqual(settings.height(), 840)
+            self.assertEqual(interval.text(), '15')
+            self.assertLessEqual(interval.width(), 110)
+            self.assertEqual(branch.count(), 0)
+            self.assertFalse(settings.sync_tabs.isEnabled())
+            self.assertTrue(all(
+                settings.findChild(QCheckBox, f'sync_area_{area}_input').isChecked()
+                for area in settings.sync_area_checkboxes
+            ))
+            self.assertEqual(test_button.parentWidget().title(), 'Git authentication')
+            settings.sync_enabled_checkbox.setChecked(True)
+            self.assertTrue(settings.sync_tabs.isEnabled())
+            settings.update_sync_branches(['develop', 'feature'], selected='')
+            self.assertEqual(branch.currentText(), '')
+            settings.update_sync_branches(['main', 'feature'], selected='')
+            self.assertEqual(branch.currentText(), 'main')
+            settings.update_sync_branches([], selected='', empty=True)
+            self.assertTrue(branch.isEditable())
             interval.setText('37')
             values = settings.collect_sync_values()
             self.assertEqual(values['interval_minutes'], 37)
@@ -444,7 +469,132 @@ class ReliabilityTests(unittest.TestCase):
         with patch.object(app, '_set_sync_status') as status:
             app.request_sync('auto', settings=sync_settings)
         self.assertEqual(app._sync_pending_action, 'auto')
-        status.assert_called_once_with('Paused until idle', persist=False)
+        status.assert_called_once_with(SYNC_STATUS_PAUSED_UNTIL_IDLE, persist=False)
+
+    def test_manual_pull_saves_sync_preferences_before_starting_without_push(self):
+        app = self.app()
+        sync_settings = default_sync_settings()
+        sync_settings.update(enabled=True, repository_url='file:///tmp/settings.git')
+        events = []
+
+        def save(settings):
+            events.append(('save', settings['repository_url']))
+            return settings
+
+        def request(*args, **kwargs):
+            events.append(('request', args[0]))
+
+        with patch('main.load_sync_settings', return_value=default_sync_settings()), \
+                patch('main.save_sync_settings', side_effect=save), \
+                patch.object(app, 'request_sync', side_effect=request):
+            app.pull_sync_settings(sync_settings)
+
+        self.assertEqual(events, [('save', 'file:///tmp/settings.git'), ('request', 'pull')])
+
+    def test_manual_pull_without_config_change_does_not_restart(self):
+        app = self.app()
+        app._sync_worker = Mock()
+        app._sync_current_restart_after = True
+        app._sync_current_restart_notice = True
+        app._sync_current_settings = default_sync_settings()
+
+        with patch('main.load_sync_settings', return_value=default_sync_settings()), \
+                patch('main.save_sync_settings', side_effect=lambda settings: settings), \
+                patch.object(app, '_configure_sync_timer'), \
+                patch.object(app, '_set_sync_status'):
+            app._on_sync_completed({
+                'action': 'pull',
+                'changed': False,
+                'config': {},
+                'remote_commit': 'same-remote-commit',
+            })
+
+        self.assertTrue(app._sync_current_succeeded)
+        self.assertFalse(app._sync_current_restart_after)
+        with patch.object(app, '_show_update_message') as notice, \
+                patch.object(app, '_request_shutdown') as shutdown:
+            app._on_sync_worker_finished()
+        notice.assert_not_called()
+        shutdown.assert_not_called()
+
+    def test_changed_manual_pull_shows_restart_notice_before_restart(self):
+        app = self.app()
+        app._sync_worker = Mock()
+        app._sync_current_restart_after = True
+        app._sync_current_restart_notice = True
+        app._sync_current_succeeded = True
+
+        with patch.object(app, '_show_update_message') as notice, \
+                patch.object(app, '_request_shutdown') as shutdown:
+            app._on_sync_worker_finished()
+
+        notice.assert_called_once_with(
+            'Settings updated',
+            'Remote settings were applied. The application will now restart to apply them.',
+        )
+        shutdown.assert_called_once_with('restart')
+
+    def test_successful_connection_persists_the_discovered_branch(self):
+        app = self.app()
+        operation_settings = default_sync_settings()
+        operation_settings.update(
+            enabled=True,
+            repository_url='file:///tmp/settings.git',
+            branch='',
+            git_path='/usr/bin/git',
+        )
+        app._sync_current_settings = operation_settings
+        saved = []
+
+        def save(settings):
+            saved.append(settings.copy())
+            return settings
+
+        with patch('main.load_sync_settings', return_value=default_sync_settings()), \
+                patch('main.save_sync_settings', side_effect=save), \
+                patch.object(app, '_configure_sync_timer'), \
+                patch.object(app, '_set_sync_status'):
+            app._on_sync_completed({
+                'action': 'test',
+                'branches': ['main'],
+                'default_branch': 'main',
+                'branch': 'main',
+                'git_path': '/usr/bin/git',
+                'remote_commit': 'remote-commit',
+            })
+
+        self.assertEqual(saved[0]['branch'], 'main')
+        app.settings_window.update_sync_branches.assert_called_once()
+        app.settings_window.mark_sync_test_success.assert_called_once()
+
+    def test_first_saved_sync_uses_safe_auto_operation(self):
+        app = self.app()
+        settings = default_sync_settings()
+        settings.update(enabled=True, repository_url='file:///tmp/settings.git', branch='main')
+        with patch('main.load_sync_settings', return_value=settings), \
+                patch.object(app, 'request_sync') as request, \
+                patch.object(app, 'restart_app') as restart:
+            app.on_settings_saved()
+        request.assert_called_once_with('auto', settings=settings, restart_after=True)
+        restart.assert_not_called()
+
+    def test_push_on_save_uses_safe_auto_operation_for_a_new_client(self):
+        app = self.app()
+        settings = default_sync_settings()
+        settings.update(enabled=True, repository_url='file:///tmp/settings.git', branch='main')
+        events = []
+
+        def save(values):
+            events.append('save')
+            return values
+
+        with patch('main.load_sync_settings', return_value=default_sync_settings()), \
+                patch('main.save_sync_settings', side_effect=save), \
+                patch.object(app, '_configure_sync_timer'), \
+                patch.object(app, 'request_sync', side_effect=lambda *args, **kwargs: events.append('request')):
+            app.push_sync_settings(settings)
+
+        self.assertEqual(events, ['save', 'request'])
 
     def test_model_discovery_extracts_openai_and_local_shapes(self):
         self.assertEqual(

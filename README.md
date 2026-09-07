@@ -122,16 +122,23 @@ user configuration directory (`~/.config/whisper-writer/sync/repository` on Linu
 model, text output and interface settings can each be enabled or disabled independently. API keys
 and other secrets are never synchronized.
 
-Enter the remote repository URL and use **Test connection and refresh branches** to discover and
-select a branch. Git is detected automatically on PATH, with an optional executable-path override.
+Enter the remote repository URL and use **Test connection and refresh branches** in the Git
+authentication section to discover and select a branch. A new setup does not preselect a branch:
+the remote's declared default (or a recognized `main`/`master` branch) is selected automatically;
+otherwise choose one of the discovered branches yourself. Git is detected automatically on PATH,
+with an optional executable-path override.
 Git authentication can use the existing Git credential helper/SSH agent, an HTTPS username and
 token/password, or an SSH private key. Authentication values remain local to the machine.
 
-Save can push selected changes automatically, and a free-form interval in minutes can check for
-changes periodically. Synchronization is paused during recording and transcription. Pull applies
-the selected remote areas and restarts WhisperWriter only after the operation succeeds. Errors are
-shown in the Synchronization tab and marked on the idle tray icon; no synchronization error popup
-or desktop notification is displayed.
+All synchronization areas are enabled by default and the default check interval is 15 minutes.
+When synchronization is enabled, the connection must be tested successfully before settings can
+be saved. Save can push selected changes automatically after the first synchronization has been
+completed. A new client always pulls a non-empty remote repository first; only an empty remote may
+be bootstrapped by a push. A manual Pull saves the local synchronization preferences first and
+never pushes as part of that save. Synchronization is paused during recording and transcription.
+Pull applies the selected remote areas and restarts WhisperWriter only after the operation succeeds.
+Errors are shown in the Synchronization tab and marked on the idle tray icon; no synchronization
+error popup or desktop notification is displayed.
 
 The tray's Update action checks the current branch on `origin`. Finish dictation before updating; updates also refuse to start while a retry is available. New recordings are disabled during installation. Every successful update automatically restarts the app so the new code and dependencies are loaded; failed updates are reported without restarting. You can also run `./update.sh` from a terminal.
 
