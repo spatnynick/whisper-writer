@@ -1,19 +1,22 @@
 #!/bin/bash
 # Pulls the latest committed changes from GitHub into this installation and
-# restarts the running instance (if any). Finish dictation before updating.
+# restarts the running instance (if any) after every successful update. Finish
+# dictation before updating.
 # Gitignored venv/ and config.yaml survive; dependencies are reconciled by pip.
 #
 # Usage: ./update.sh   (from anywhere, or via the installed `whisperwriter-update` alias)
 #        ./update.sh --check-only   (exit 0=current, 10=update available)
+#        ./update.sh --no-restart   (tray-supervised install; caller owns the mandatory restart)
 set -euo pipefail
 
 main() {
-    local check_only=0
+    local check_only=0 restart=1
     case "${1:-}" in
         "") ;;
         --check-only) check_only=1 ;;
+        --no-restart) restart=0 ;;
         *)
-            echo "Usage: $0 [--check-only]" >&2
+            echo "Usage: $0 [--check-only|--no-restart]" >&2
             exit 2
             ;;
     esac
@@ -85,6 +88,10 @@ main() {
     venv/bin/python3 -m pip check
 
     echo "Update complete."
+    # The tray owns restart when it supervises this process, and reports failures.
+    if [ "$restart" -eq 0 ]; then
+        return
+    fi
 
     local pids pid
     pids="$(pgrep -f "$install_dir/venv/bin/python3 src/main.py" || true)"

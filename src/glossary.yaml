@@ -124,6 +124,7 @@ categories:
     - cgroup
     - namespace
     - Docker
+    - KDE
     - Kubernetes
     - kubectl
     - Pacemaker

@@ -10,16 +10,15 @@ model_options:
     language:
       value: null
       type: str
-      description: "The language code for the transcription in ISO-639-1 format."
+      description: "Optional input language in ISO-639-1 format (for example hu or de). Leave empty to detect the spoken language automatically; transcription stays in that input language."
     temperature:
       value: 0.0
       type: float
       description: "Controls the randomness of the transcription output. Lower values make the output more focused and deterministic."
     initial_prompt:
-      value: >-
-        I am dictating natural messages about customer projects, SAP consulting, ABAP programming, Linux administration, and technical support. Use correct technical terms such as SAP, S/4HANA, ECC, HANA, Fiori, ABAP, BAPI, IDoc, RFC, BAdI, ALV, CDS view, OData, transaction codes, SE80, SE11, SE37, SPRO, ST22, SM21, transport requests, customizing, BASIS, systemd, Linux, Ubuntu, Debian, Red Hat, shell, Bash, SSH, sudo, permissions, processes, services, logs, journalctl, systemctl, grep, awk, sed, curl, Docker, and Git. Customer names, product names, commands, paths, hostnames, and ticket numbers may be dictated. Preserve capitalization, abbreviations, and punctuation.
+      value: null
       type: str
-      description: "Optional multi-line context used as an initial prompt to condition the transcription. The default covers customer communication, SAP consulting, ABAP programming, and Linux administration terms. More info: https://developers.openai.com/api/docs/guides/speech-to-text"
+      description: "Optional context for transcription. An empty value uses a language-neutral list of technical keywords, so automatic language detection can keep the spoken language. When entering custom prose, write it in the language of the recording; do not use an English sample for multilingual dictation. More info: https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create"
 
   # Configuration options for the OpenAI API
   api:

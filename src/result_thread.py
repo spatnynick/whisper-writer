@@ -66,6 +66,17 @@ class ResultThread(QThread):
         self.is_recording = False
         self.mutex.unlock()
 
+    def set_recording_model(self, model_name):
+        """Select a model atomically with respect to capture stop/cancellation."""
+        self.mutex.lock()
+        try:
+            if not self.is_running or not self.is_recording or self.is_cancelled:
+                return False
+            self.model_name = model_name
+            return True
+        finally:
+            self.mutex.unlock()
+
     def _retained_recording(self, audio_data):
         """Build the in-memory retry entry for captured audio."""
         if audio_data is None:
@@ -191,6 +202,8 @@ class ResultThread(QThread):
             return (None, pyaudio.paContinue)
 
         sound_device = recording_options.get('sound_device')
+        if sound_device is not None and sound_device != '':
+            sound_device = int(sound_device)
         audio = pyaudio.PyAudio()
         try:
             stream = audio.open(format=pyaudio.paInt16, channels=1, rate=self.sample_rate,
@@ -227,9 +240,18 @@ class ResultThread(QThread):
                         if speech_detected and silent_frame_count > silence_frames:
                             break
             finally:
-                stream.stop_stream()
-                stream.close()
+                try:
+                    stream.stop_stream()
+                finally:
+                    stream.close()
                 logger.debug("Audio stream closed")
+            # A stop/release can arrive while complete callback frames are queued.
+            # Once the stream is closed no producer remains; retain the captured tail.
+            while True:
+                try:
+                    recording.extend(audio_frames.get_nowait())
+                except Empty:
+                    break
         finally:
             audio.terminate()
 

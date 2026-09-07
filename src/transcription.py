@@ -19,14 +19,7 @@ def _initial_prompt():
     model_options = ConfigManager.get_config_section('model_options')
     common_options = model_options.get('common', {}) if isinstance(model_options, dict) else {}
     configured = common_options.get('initial_prompt') if isinstance(common_options, dict) else None
-    if configured:
-        return configured
-
-    try:
-        default = ConfigManager.get_schema()['model_options']['common']['initial_prompt']['value']
-    except (KeyError, TypeError):
-        default = None
-    return default or glossary.build_initial_prompt()
+    return glossary.normalize_initial_prompt(configured)
 
 def create_local_model():
     """

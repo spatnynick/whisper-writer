@@ -44,10 +44,12 @@ class WhisperWriterApp(QObject):
         self.app.setQuitOnLastWindowClosed(False)
 
         self.failed_recordings = []
+        self._retry_status = None
         self._retrying = False
         self._shutdown_action = None
         self._continue_recording = False
         self._update_process = None
+        self._update_phase = None
         self._model_slot = 0
         self.active_model_name = None
         self._model_hold_pending = False
@@ -123,6 +125,8 @@ class WhisperWriterApp(QObject):
         """
         Initialize the components of the application.
         """
+        if getattr(self, 'key_listener', None) is not None:
+            return
         self.escape_guard = EscapeGuard(self)
         self.input_simulator = InputSimulator()
 
@@ -132,7 +136,6 @@ class WhisperWriterApp(QObject):
         self.key_listener.add_callback("on_cancel_key", self.cancelRequested.emit)
 
         model_options = ConfigManager.get_config_section('model_options')
-        model_path = model_options.get('local', {}).get('model_path')
         self.local_model = create_local_model() if not model_options.get('use_api') else None
 
         self.result_thread = None
@@ -299,11 +302,13 @@ class WhisperWriterApp(QObject):
         process.finished.connect(self._on_update_check_finished)
         process.errorOccurred.connect(self._on_update_check_error)
         self._update_process = process
+        self._update_phase = 'checking'
         process.start(UPDATE_SCRIPT, ['--check-only'])
 
     def _clear_update_process(self):
         process = self._update_process
         self._update_process = None
+        self._update_phase = None
         self.update_action.setEnabled(True)
         if process:
             process.deleteLater()
@@ -353,25 +358,52 @@ class WhisperWriterApp(QObject):
         )
 
     def _start_update(self):
+        # Recording or shutdown may have begun while the asynchronous fetch ran.
+        if self._shutdown_action or self.result_thread is not None or self.failed_recordings:
+            self._restore_update_indicator()
+            return
         self.update_action.setEnabled(False)
         self._set_update_indicator('updating')
-        started, _pid = QProcess.startDetached(UPDATE_SCRIPT, [], PROJECT_ROOT)
-        if started:
+        process = QProcess(self)
+        process.setWorkingDirectory(PROJECT_ROOT)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.finished.connect(self._on_update_finished)
+        process.errorOccurred.connect(self._on_update_error)
+        self._update_process = process
+        self._update_phase = 'updating'
+        process.start(UPDATE_SCRIPT, ['--no-restart'])
+
+    def _on_update_error(self, error):
+        if error == QProcess.FailedToStart:
+            self._on_update_finished(-1, QProcess.CrashExit)
+
+    def _on_update_finished(self, exit_code, exit_status):
+        process = self._update_process
+        if process is None:
             return
-        self.update_action.setEnabled(True)
+        output = bytes(process.readAllStandardOutput()).decode('utf-8', errors='replace')
+        self._clear_update_process()
+        if exit_code == 0 and exit_status == QProcess.NormalExit:
+            # The updater was launched with --no-restart, so a successful tray update
+            # must restart this process to load the new checkout and dependencies.
+            self._request_shutdown('restart')
+            return
+        logger.warning('Updater failed with code %s: %s', exit_code, output.strip())
         self._restore_update_indicator()
         self._show_update_message(
             'Update failed',
-            'WhisperWriter found an update but could not start the updater. Run ./update.sh manually.',
+            'WhisperWriter could not complete the update. Check the application log and run ./update.sh to retry.',
             QMessageBox.Warning,
         )
+        if self._shutdown_action:
+            self._finish_shutdown()
 
     def update_tray_icon(self, status):
         """
         Update the system tray icon to reflect the current recording/transcribing status,
         if enabled via the misc.show_tray_status_icon setting.
         """
-        if status in ('idle', 'error', 'cancel') and self.failed_recordings:
+        if status in ('idle', 'cancel') and self.failed_recordings and self._retry_status == 'error':
             status = 'error'
         active_model = getattr(self, 'active_model_name', None)
         model_suffix = ''
@@ -405,6 +437,12 @@ class WhisperWriterApp(QObject):
         # A failed retry retains the original entry rather than duplicating it.
         if not self._retrying:
             self.failed_recordings[:] = [recording]
+            worker = getattr(self, 'result_thread', None)
+            self._retry_status = (
+                'cancelled'
+                if worker and getattr(worker, 'is_cancelled', False) is True
+                else 'error'
+            )
         self._update_retry_actions()
 
     def _configured_model_pair(self):
@@ -421,20 +459,11 @@ class WhisperWriterApp(QObject):
         return primary, secondary
 
     def _selected_model(self):
-        """Return the selected model slot, falling back to primary if secondary is disabled."""
+        """Return the selected configured model slot."""
         primary, secondary = self._configured_model_pair()
         if getattr(self, '_model_slot', 0) == 1 and secondary:
             return secondary
         return primary
-
-    def _switch_model(self):
-        """Toggle the selected model slot while keeping the current recording alive."""
-        _primary, secondary = self._configured_model_pair()
-        if secondary:
-            self._model_slot = 1 - getattr(self, '_model_slot', 0)
-        else:
-            self._model_slot = 0
-        return self._selected_model()
 
     def _begin_model_hold(self, action='stop'):
         """Wait briefly to distinguish a tap from a long model-switch press.
@@ -464,7 +493,7 @@ class WhisperWriterApp(QObject):
     def _recording_worker_active(self, worker=None):
         """Handle the brief gap before the worker's queued recording status reaches Qt."""
         worker = worker or getattr(self, 'result_thread', None)
-        if not worker or not worker.isRunning():
+        if not worker or not worker.isRunning() or not worker.is_recording:
             return False
         if self.current_status == 'recording':
             return True
@@ -483,8 +512,15 @@ class WhisperWriterApp(QObject):
             self._cancel_model_hold()
             self._finish_short_model_press()
             return
+        next_slot = 1 - self._model_slot
+        self._model_slot = next_slot
+        model_name = self._selected_model()
+        if not worker.set_recording_model(model_name):
+            self._model_slot = 1 - next_slot
+            self._cancel_model_hold()
+            return
         self._model_hold_triggered = True
-        self._set_active_model(self._switch_model())
+        self._set_active_model(model_name)
 
     def _finish_short_model_press(self):
         """Stop capture for a short activation press and let the worker transcribe it."""
@@ -505,7 +541,7 @@ class WhisperWriterApp(QObject):
             self.update_tray_icon(self.current_status)
 
     def retry_transcription(self):
-        if not self.failed_recordings or self.result_thread is not None or self._shutdown_action:
+        if not self.failed_recordings or self.result_thread is not None or self._shutdown_action or getattr(self, '_update_phase', None) == 'updating':
             return
         recording = self.failed_recordings[0]
         audio_data, sample_rate = recording[:2]
@@ -560,6 +596,8 @@ class WhisperWriterApp(QObject):
         self._continue_recording = False
         if getattr(self, 'key_listener', None):
             self.key_listener.stop()
+        if getattr(self, '_update_phase', None) == 'updating':
+            return
         thread = getattr(self, 'result_thread', None)
         if thread and thread.isRunning():
             thread.stop()
@@ -568,9 +606,11 @@ class WhisperWriterApp(QObject):
 
     def _finish_shutdown(self):
         self.cleanup()
-        QApplication.quit()
         if self._shutdown_action == 'restart':
-            QProcess.startDetached(sys.executable, sys.argv)
+            # Replace this process so the old instance cannot retain its lock while
+            # a second interpreter starts. Python file descriptors close on exec.
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        QApplication.quit()
 
     def apply_live_settings(self):
         """
@@ -587,7 +627,7 @@ class WhisperWriterApp(QObject):
         """
         If settings is closed without saving on first run, initialize the components with default values.
         """
-        if not os.path.exists(os.path.join('src', 'config.yaml')):
+        if not ConfigManager.config_file_exists() and not getattr(self, 'key_listener', None):
             QMessageBox.information(
                 self.settings_window,
                 'Using Default Values',
@@ -599,6 +639,8 @@ class WhisperWriterApp(QObject):
         """
         Called when the activation key combination is pressed.
         """
+        if self._shutdown_action or getattr(self, '_update_phase', None) == 'updating':
+            return
         if self.result_thread and self.result_thread.isRunning():
             if self._recording_worker_active(self.result_thread):
                 _primary, secondary = self._configured_model_pair()
@@ -642,11 +684,12 @@ class WhisperWriterApp(QObject):
         """
         Start the result thread to record audio and transcribe it.
         """
-        if self._shutdown_action or self.result_thread is not None:
+        if self._shutdown_action or self.result_thread is not None or getattr(self, '_update_phase', None) == 'updating':
             return
 
         # Starting a new recording explicitly abandons the previous failed audio.
         self.failed_recordings.clear()
+        self._retry_status = None
         if reset_selection:
             self._model_slot = 0
         if model_name is None:
@@ -674,6 +717,7 @@ class WhisperWriterApp(QObject):
         Stop the result thread.
         """
         self._continue_recording = False
+        self._cancel_model_hold()
         if self.result_thread and self.result_thread.isRunning():
             self.result_thread.stop()
 
@@ -709,6 +753,12 @@ class WhisperWriterApp(QObject):
         # A queued failedAudioSignal normally arrives before finished, but make the
         # retention guarantee independent of Qt's cross-thread delivery order.
         retained_recording = getattr(thread, 'retained_recording', None) if thread else None
+        if thread and getattr(thread, 'is_cancelled', False) is True:
+            self._retry_status = 'cancelled'
+        elif thread and getattr(thread, 'transcription_failed', False) is True:
+            self._retry_status = 'error'
+        elif thread and getattr(thread, 'transcription_succeeded', False) is True:
+            self._retry_status = None
         if (
             thread
             and not self._retrying
@@ -719,12 +769,6 @@ class WhisperWriterApp(QObject):
         ):
             self.failed_recordings[:] = [retained_recording]
             self._update_retry_actions()
-        cancelled_with_audio = bool(
-            thread
-            and not self._retrying
-            and getattr(thread, 'is_cancelled', False) is True
-            and self.failed_recordings
-        )
         if self._retrying and thread and thread.transcription_succeeded:
             self.failed_recordings.pop(0)
         self._retrying = False
@@ -744,15 +788,6 @@ class WhisperWriterApp(QObject):
             self.update_tray_icon('idle')
             if getattr(self, 'status_window', None):
                 self.status_window.updateStatus('idle')
-                if cancelled_with_audio:
-                    self.status_window.show_retry()
-            if cancelled_with_audio:
-                self.tray_icon.showMessage(
-                    'WhisperWriter',
-                    'Recording cancelled. Audio is retained; click Retry in the popup or tray menu.',
-                    QSystemTrayIcon.Warning,
-                    5000,
-                )
 
     def on_cancel_key(self):
         """
@@ -762,10 +797,11 @@ class WhisperWriterApp(QObject):
         if getattr(self, 'settings_window', None) and self.settings_window.isActiveWindow():
             self.settings_window.discard_and_close()
             return
-        if self.result_thread and self.result_thread.isRunning() and self.current_status == 'recording':
+        if self._recording_worker_active():
             # A cancelled continuous recording must not immediately start a new segment;
             # the retained audio is offered through the retry controls instead.
             self._continue_recording = False
+            self._cancel_model_hold()
             self.result_thread.cancel_recording()
 
     def on_transcription_complete(self, result):

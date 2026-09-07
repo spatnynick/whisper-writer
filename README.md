@@ -106,26 +106,24 @@ python run.py
 ```
 
 #### 5. Configure and start WhisperWriter:
-On first run, a Settings window should appear. Once configured and saved, another window will open. Press "Start" to activate the keyboard listener. Press the activation key (`ctrl+shift+space` by default) to start recording and transcribing to the active window.
+On first run, a Settings window should appear. After saving, WhisperWriter restarts into the system tray and listens for the activation shortcut (`ctrl+shift+space` by default). Press it to start recording. Open Settings from the tray menu or double-click the tray icon.
 
 ### Configuration Options
 
-WhisperWriter uses a configuration file to customize its behaviour. To set up the configuration, open the Settings window:
+WhisperWriter uses a configuration file to customize its behaviour. Settings is organized into Transcription, Recording, Text output, General and About tabs. Related controls are grouped together; the tabs scroll when the window is small. Save applies changes, while Discard changes restores the saved values. Escape discards edits and closes Settings.
 
-<p align="center">
-    <img src="./assets/ww-settings-demo.gif" alt="WhisperWriter Settings window demo gif" width="350" height="350">
-</p>
+The tray's Update action checks the current branch on `origin`. Finish dictation before updating; updates also refuse to start while a retry is available. New recordings are disabled during installation. Every successful update automatically restarts the app so the new code and dependencies are loaded; failed updates are reported without restarting. You can also run `./update.sh` from a terminal.
 
 #### Model Options
 - `use_api`: Toggle to choose whether to use the OpenAI API or a local Whisper model for transcription. (Default: `false`)
 - `common`: Options common to both API and local models.
-  - `language`: The language code for the transcription in [ISO-639-1 format](https://en.wikipedia.org/wiki/List_of_ISO_639_language_codes). (Default: `null`)
+  - `language`: Optional input language in [ISO-639-1 format](https://en.wikipedia.org/wiki/List_of_ISO_639_language_codes). Leave it empty to detect the spoken language automatically; transcription stays in that input language. (Default: `null`)
   - `temperature`: Controls the randomness of the transcription output. Lower values make the output more focused and deterministic. (Default: `0.0`)
-  - `initial_prompt`: Optional multi-line context used to condition the transcription. An empty setting uses a built-in natural technical-dictation prompt suited to customer communication, SAP consulting, ABAP programming, and Linux administration. More info: [OpenAI speech-to-text guide](https://developers.openai.com/api/docs/guides/speech-to-text).
+  - `initial_prompt`: Optional context used to condition the transcription. An empty setting uses a language-neutral comma-separated technical keyword list, which preserves automatic language detection. For multilingual dictation, leave it empty or use keywords/proper names; custom prose should be written in the recording language. OpenAI documents that the prompt should match the audio language. See the [transcription API reference](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create).
 
 - `api`: Configuration options for the OpenAI API. See the [OpenAI transcription API reference](https://developers.openai.com/api/reference/python/resources/audio/subresources/transcriptions/methods/create) for more information.
   - `base_url`: The base URL for an OpenAI-compatible API. The Settings window can load models from its `/models` endpoint. (Default: `https://api.openai.com/v1`)
-  - `model`: The primary transcription model. The Settings window provides an editable dropdown and Refresh button when the endpoint exposes available models; the last selected value remains selected after refresh and when Settings is reopened. Every new recording starts with this model; hold the first activation for 400 ms to select the secondary model. (Default: `whisper-1`)
+  - `model`: The primary transcription model used by a short activation. Model ids ending in `.en` are English-only, so choose the model that fits your recordings. A held activation switches to the configured secondary model; WhisperWriter never substitutes a model based on detected language. (Default: `whisper-1`)
   - `secondary_model`: Optional secondary model. After the first press, a short activation stops and transcribes; a held activation alternates primary and secondary without stopping capture. The active model is shown in the tray tooltip and status popup. (Default: `null`)
   - `api_key`: Your API key for the OpenAI API. Required for non-local API usage. (Default: `null`)
 

@@ -21,11 +21,9 @@ class SingleInstanceLock:
 
     def acquire(self, retries=15, delay=0.2):
         """
-        Try to acquire the lock, retrying briefly (3s by default). The retry window exists
-        for WhisperWriterApp.restart_app(): it starts the new process via
-        QProcess.startDetached() before the old process has actually exited (that only
-        happens once QApplication.quit() unwinds app.exec_() back in run()), so the new
-        process can briefly race the old one for the lock on a settings-triggered restart.
+        Try to acquire the lock, retrying briefly (3s by default) to allow another
+        instance that is shutting down to release it. Settings restarts replace the
+        existing process with exec, which closes the old lock descriptor first.
         """
         os.makedirs(os.path.dirname(self.lock_path), exist_ok=True)
         self._fh = open(self.lock_path, 'w')

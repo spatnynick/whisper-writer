@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock, patch
 import numpy as np
-from PyQt5.QtCore import QObject, QThread, Qt, QTimer
+from PyQt5.QtCore import QObject, QThread, Qt, QTimer, QProcess, QPoint
 from PyQt5.QtWidgets import QApplication, QComboBox, QLabel, QLineEdit, QPushButton, QTextEdit, QWidget, QGroupBox, QSystemTrayIcon
 from utils import ConfigManager
 from result_thread import ResultThread
@@ -38,12 +38,14 @@ class ReliabilityTests(unittest.TestCase):
         app = WhisperWriterApp.__new__(WhisperWriterApp)
         QObject.__init__(app)
         app.failed_recordings = []
+        app._retry_status = None
         app._retrying = False
         app.retry_transcript_action = Mock()
         app.update_action = Mock()
         app._shutdown_action = None
         app._continue_recording = False
         app._update_process = None
+        app._update_phase = None
         app._model_slot = 0
         app.active_model_name = None
         app._model_hold_pending = False
@@ -82,7 +84,7 @@ class ReliabilityTests(unittest.TestCase):
         process.deleteLater.assert_called_once()
         app.update_action.setEnabled.assert_called_with(True)
 
-    def test_update_check_available_starts_detached_updater(self):
+    def test_update_check_available_starts_updater(self):
         app = self.app()
         process = Mock()
         process.readAllStandardOutput.return_value = b'UPDATE_AVAILABLE\n'
@@ -125,18 +127,67 @@ class ReliabilityTests(unittest.TestCase):
         app.tray_icon.setIcon.assert_called_with(app.tray_icon_updating)
         app.tray_icon.setToolTip.assert_called_with('WhisperWriter — checking...')
         app.tray_icon.reset_mock()
-        with patch('main.QProcess.startDetached', return_value=(True, 123)):
+        with patch('main.QProcess') as process:
             app._start_update()
+        process.return_value.start.assert_called_once_with(os.path.abspath('update.sh'), ['--no-restart'])
         app.tray_icon.setIcon.assert_called_with(app.tray_icon_updating)
         app.tray_icon.showMessage.assert_not_called()
         app.tray_icon.setToolTip.assert_called_with('WhisperWriter — updating...')
 
-    def test_detached_update_failure_reenables_action(self):
+    def test_update_failure_reenables_action(self):
         app = self.app()
-        with patch('main.QProcess.startDetached', return_value=(False, None)), patch.object(app, '_show_update_message') as show:
-            app._start_update()
+        app._update_process = Mock()
+        app._update_process.readAllStandardOutput.return_value = b'pip failed'
+        app._update_phase = 'updating'
+        with patch.object(app, '_show_update_message') as show:
+            app._on_update_finished(1, QProcess.NormalExit)
         app.update_action.setEnabled.assert_called_with(True)
+        self.assertIsNone(app._update_phase)
         self.assertEqual(show.call_args.args[0], 'Update failed')
+
+    def test_update_rechecks_recording_after_fetch(self):
+        for retained in (False, True):
+            app = self.app()
+            if retained:
+                app.failed_recordings = [(np.ones(1600), 16000)]
+            else:
+                app.result_thread = Mock()
+            with patch('main.QProcess') as process:
+                app._start_update()
+            process.assert_not_called()
+
+    def test_updating_blocks_recording_and_defers_exit(self):
+        app = self.app()
+        app._update_phase = 'updating'
+        with patch.object(app, '_start_worker') as start, patch.object(app, '_finish_shutdown') as finish:
+            app.on_activation()
+            app.start_result_thread()
+            start.assert_not_called()
+            app.exit_app()
+            finish.assert_not_called()
+
+    def test_successful_update_restarts_only_after_process_finishes(self):
+        app = self.app()
+        app._update_process = Mock()
+        app._update_process.readAllStandardOutput.return_value = b'Update complete.'
+        app._update_phase = 'updating'
+        with patch.object(app, '_request_shutdown') as shutdown:
+            app._on_update_finished(0, QProcess.NormalExit)
+        shutdown.assert_called_once_with('restart')
+        self.assertIsNone(app._update_process)
+
+    def test_restart_replaces_existing_process(self):
+        app = self.app()
+        app._shutdown_action = 'restart'
+        with patch('main.os.execv') as execute, patch('main.QApplication.quit'):
+            app._finish_shutdown()
+        execute.assert_called_once_with(sys.executable, [sys.executable] + sys.argv)
+
+    def test_settings_close_with_defaults_does_not_initialize_twice(self):
+        app = self.app()
+        with patch('main.ConfigManager.config_file_exists', return_value=False), patch.object(app, 'initialize_components') as initialize:
+            app.on_settings_closed()
+        initialize.assert_not_called()
 
     def test_early_release_is_not_overwritten(self):
         worker = ResultThread()
@@ -217,6 +268,32 @@ class ReliabilityTests(unittest.TestCase):
             worker._record_audio()
         audio.open.return_value.close.assert_called_once()
 
+    def test_stop_preserves_queued_audio_tail_and_numeric_device(self):
+        worker = ResultThread()
+        audio = Mock()
+        blocks = [np.full(480, i, dtype=np.int16).tobytes() for i in range(8)]
+        ConfigManager.set_config_value('2', 'recording_options', 'sound_device')
+        def open_audio(**kwargs):
+            self.assertEqual(kwargs['input_device_index'], 2)
+            for block in blocks:
+                kwargs['stream_callback'](block, 480, None, 0)
+            worker.stop_recording()
+            return audio.open.return_value
+        audio.open.side_effect = open_audio
+        with patch('result_thread.pyaudio.PyAudio', return_value=audio):
+            result = worker._record_audio()
+        self.assertEqual(result.tobytes(), b''.join(blocks))
+
+    def test_stream_close_runs_even_when_stop_stream_fails(self):
+        worker = ResultThread()
+        worker.stop_recording()
+        audio = Mock()
+        audio.open.return_value.stop_stream.side_effect = RuntimeError('device removed')
+        with patch('result_thread.pyaudio.PyAudio', return_value=audio), self.assertRaises(RuntimeError):
+            worker._record_audio()
+        audio.open.return_value.close.assert_called_once()
+        audio.terminate.assert_called_once()
+
     def test_typing_failure_restores_listener_and_keeps_text(self):
         app = self.app()
         app.input_simulator.typewrite.side_effect = RuntimeError('failure')
@@ -286,6 +363,7 @@ class ReliabilityTests(unittest.TestCase):
             prompt = settings.findChild(QTextEdit, 'model_options_common_initial_prompt_input')
             prompt_link = settings.findChild(QLabel, 'model_options_common_initial_prompt_link')
             model_group = settings.findChild(QGroupBox, 'model_options_api_models_group')
+            language_warning = settings.findChild(QLabel, 'model_options_api_model_language_warning')
             refresh_button = settings.findChild(QPushButton, 'model_options_api_model_refresh')
             timeout = settings.findChild(QLineEdit, 'model_options_api_timeout_seconds_input')
             api_key = settings.findChild(QLineEdit, 'model_options_api_api_key_input')
@@ -297,6 +375,7 @@ class ReliabilityTests(unittest.TestCase):
             self.assertIsNotNone(prompt)
             self.assertIsNotNone(prompt_link)
             self.assertIsNotNone(model_group)
+            self.assertIsNone(language_warning)
             self.assertIsNotNone(refresh_button)
             self.assertIsNotNone(timeout)
             self.assertIsNotNone(api_key)
@@ -304,12 +383,14 @@ class ReliabilityTests(unittest.TestCase):
             self.assertTrue(secondary_combo.isEditable())
             self.assertEqual(settings.get_widget_value_typed(model_container, 'str'), 'whisper-1')
             self.assertIsNone(settings.get_widget_value_typed(secondary_container, 'str'))
-            self.assertIn('customer projects', settings.get_widget_value_typed(prompt, 'str'))
+            self.assertIn('SAP', settings.get_widget_value_typed(prompt, 'str'))
+            self.assertIn('KDE', settings.get_widget_value_typed(prompt, 'str'))
+            self.assertNotIn('I am dictating natural messages', settings.get_widget_value_typed(prompt, 'str'))
             self.assertTrue(prompt_link.openExternalLinks())
             self.assertIn('https://developers.openai.com/api/docs/guides/speech-to-text', prompt_link.text())
-            self.assertGreater(prompt.geometry().top(), settings.height() // 3)
+            self.assertGreater(prompt.mapTo(settings, QPoint()).y(), settings.height() // 3)
             self.assertGreater(prompt.width(), 450)
-            self.assertGreater(prompt_link.geometry().top(), prompt.geometry().bottom())
+            self.assertGreater(prompt_link.mapTo(settings, QPoint()).y(), prompt.mapTo(settings, QPoint(0, prompt.height())).y())
             api_order = list(ConfigManager.get_schema()['model_options']['api'])
             self.assertLess(api_order.index('base_url'), api_order.index('model'))
             self.assertLess(api_order.index('model'), api_order.index('secondary_model'))
@@ -334,18 +415,84 @@ class ReliabilityTests(unittest.TestCase):
         )
         self.assertEqual(SettingsWindow._models_url('http://localhost:1234/v1/').toString(), 'http://localhost:1234/v1/models')
 
+    def test_settings_reset_preserves_environment_key(self):
+        with patch.dict(os.environ, {'OPENAI_API_KEY': 'test-only-key'}):
+            settings = SettingsWindow()
+            try:
+                settings.api_key_input.setText('unsaved-key')
+                settings.reset_settings()
+                self.assertEqual(settings.api_key_input.text(), 'test-only-key')
+                self.assertEqual(settings.changed_settings(), [])
+            finally:
+                settings.close()
+
+    def test_invalid_numeric_edit_can_be_discarded_and_cannot_be_saved(self):
+        settings = SettingsWindow()
+        try:
+            field = settings.findChild(QLineEdit, 'model_options_api_timeout_seconds_input')
+            field.setText('not a number')
+            self.assertTrue(settings.changed_settings())
+            with patch('ui.settings_window.QMessageBox.warning') as warning, patch.object(ConfigManager, 'save_config') as save:
+                settings.save_settings()
+            warning.assert_called_once()
+            save.assert_not_called()
+            settings.discard_and_close()
+            self.assertFalse(settings.changed_settings())
+        finally:
+            settings.reset_settings()
+            settings.close()
+
+    def test_endpoint_edit_invalidates_pending_model_response(self):
+        settings = SettingsWindow()
+        try:
+            reply = Mock()
+            settings.model_discovery_reply = reply
+            request_id = settings.model_discovery_request_id
+            settings.api_base_url_input.setText('http://127.0.0.1:9/v1')
+            reply.abort.assert_called_once()
+            settings._on_model_discovery_finished(reply, request_id)
+            reply.readAll.assert_not_called()
+        finally:
+            settings.reset_settings()
+            settings.close()
+
     def test_empty_initial_prompt_uses_schema_default(self):
         ConfigManager.set_config_value(None, 'model_options', 'common', 'initial_prompt')
         default_prompt = transcription._initial_prompt()
-        self.assertIn('customer projects', default_prompt)
-        self.assertIn('SAP consulting', default_prompt)
-        self.assertIn('ABAP programming', default_prompt)
-        self.assertIn('Linux administration', default_prompt)
+        self.assertIn('SAP', default_prompt)
+        self.assertIn('ABAP', default_prompt)
+        self.assertIn('systemd', default_prompt)
+        self.assertIn('KDE', default_prompt)
+        self.assertNotIn('I am dictating natural messages', default_prompt)
+        self.assertNotIn('transaction', default_prompt.lower())
+        self.assertNotIn('user exit', default_prompt.lower())
         self.assertNotIn('Python function', default_prompt)
         self.assertNotIn('JavaScript handler', default_prompt)
         self.assertNotIn('JSON over HTTPS', default_prompt)
         ConfigManager.set_config_value('my custom vocabulary', 'model_options', 'common', 'initial_prompt')
         self.assertEqual(transcription._initial_prompt(), 'my custom vocabulary')
+
+    def test_legacy_english_prompt_is_migrated_to_keyword_context(self):
+        ConfigManager.set_config_value(
+            'I am dictating natural messages about customer projects, SAP consulting, '
+            'ABAP programming, Linux administration, and technical support. Preserve capitalization.',
+            'model_options', 'common', 'initial_prompt',
+        )
+        prompt = transcription._initial_prompt()
+        self.assertIn('SAP', prompt)
+        self.assertNotIn('I am dictating natural messages', prompt)
+
+    def test_api_prompt_is_keyword_context_when_language_is_automatic(self):
+        ConfigManager.set_config_value(True, 'model_options', 'use_api')
+        ConfigManager.set_config_value(None, 'model_options', 'common', 'language')
+        ConfigManager.set_config_value(None, 'model_options', 'common', 'initial_prompt')
+        with patch.dict(os.environ, {'OPENAI_API_KEY': ''}), patch('transcription.OpenAI') as client:
+            client.return_value.__enter__.return_value.audio.transcriptions.create.return_value.text = 'ok'
+            transcription.transcribe_api(np.zeros(1600, dtype=np.int16))
+            request = client.return_value.__enter__.return_value.audio.transcriptions.create.call_args.kwargs
+        self.assertIsNone(request['language'])
+        self.assertIn('SAP', request['prompt'])
+        self.assertNotIn('I am dictating natural messages', request['prompt'])
 
     def test_settings_refreshes_models_from_configured_endpoint(self):
         calls = []
@@ -448,9 +595,18 @@ class ReliabilityTests(unittest.TestCase):
         app = self.app()
         app.tray_icon_error = object()
         app.failed_recordings = [(np.ones(1600), 16000)]
+        app._retry_status = 'error'
         app.update_tray_icon('idle')
         app.tray_icon.setIcon.assert_called_with(app.tray_icon_error)
         self.assertIn('retry available', app.tray_icon.setToolTip.call_args.args[0])
+
+    def test_cancelled_audio_keeps_idle_tray_icon_with_retry_available(self):
+        app = self.app()
+        app.failed_recordings = [(np.ones(1600), 16000)]
+        app._retry_status = 'cancelled'
+        app.update_tray_icon('idle')
+        app.tray_icon.setIcon.assert_called_with(app.tray_icon_idle)
+        app.tray_icon.setToolTip.assert_called_with('WhisperWriter — Idle')
 
     def test_model_selection_alternates_with_long_holds_and_short_stop(self):
         app = self.app()
@@ -493,6 +649,17 @@ class ReliabilityTests(unittest.TestCase):
             app.on_activation()
             third_worker = start.call_args.args[0]
         self.assertEqual(third_worker.model_name, 'primary-model')
+
+    def test_app_honors_explicit_english_only_primary_model(self):
+        app = self.app()
+        ConfigManager.set_config_value(True, 'model_options', 'use_api')
+        ConfigManager.set_config_value('Systran/faster-whisper-small.en', 'model_options', 'api', 'model')
+        ConfigManager.set_config_value('deepdml/faster-whisper-large-v3-turbo-ct2', 'model_options', 'api', 'secondary_model')
+        ConfigManager.set_config_value(None, 'model_options', 'common', 'language')
+        with patch.object(app, '_start_worker') as start:
+            app.start_result_thread()
+        self.assertEqual(start.call_args.args[0].model_name, 'Systran/faster-whisper-small.en')
+        self.assertEqual(app.active_model_name, 'Systran/faster-whisper-small.en')
 
     def test_first_long_press_selects_secondary_and_next_recording_resets_primary(self):
         app = self.app()
@@ -545,7 +712,7 @@ class ReliabilityTests(unittest.TestCase):
         app.on_tray_activated(QSystemTrayIcon.Trigger)
         app.settings_window.close.assert_called_once()
 
-    def test_cancelled_worker_shows_retry_popup_and_notification(self):
+    def test_cancelled_worker_hides_status_popup_but_keeps_retry_audio(self):
         app = self.app()
         app.status_window = Mock()
         retained = (np.ones(1600, dtype=np.int16), 16000, 'primary-model')
@@ -557,8 +724,9 @@ class ReliabilityTests(unittest.TestCase):
         with patch.object(app, 'update_tray_icon'):
             app.on_worker_finished()
         self.assertEqual(app.failed_recordings, [retained])
-        app.status_window.show_retry.assert_called_once()
-        app.tray_icon.showMessage.assert_called_once()
+        app.status_window.updateStatus.assert_called_once_with('idle')
+        app.status_window.show_retry.assert_not_called()
+        app.tray_icon.showMessage.assert_not_called()
 
     def test_escape_cancel_disables_continuous_restart(self):
         app = self.app()
@@ -578,6 +746,35 @@ class ReliabilityTests(unittest.TestCase):
         app.current_status = 'recording'
         app.on_activation()
         app.result_thread.stop_recording.assert_called_once()
+
+    def test_model_hold_cannot_change_model_after_capture_ends(self):
+        app = self.app()
+        app.result_thread = Mock(is_recording=False)
+        app.result_thread.isRunning.return_value = True
+        app.current_status = 'recording'  # Queued transcription status has not arrived.
+        app._begin_model_hold()
+        with patch.object(app, '_set_active_model') as select:
+            app._on_model_hold()
+        select.assert_not_called()
+        self.assertFalse(app._model_hold_pending)
+
+    def test_worker_model_selection_is_frozen_on_stop_or_cancel(self):
+        for stop_method in ('stop_recording', 'cancel_recording', 'stop'):
+            worker = ResultThread(model_name='primary')
+            self.assertTrue(worker.set_recording_model('secondary'))
+            getattr(worker, stop_method)()
+            self.assertFalse(worker.set_recording_model('primary'))
+            self.assertEqual(worker.model_name, 'secondary')
+
+    def test_escape_cancels_before_recording_status_is_delivered(self):
+        app = self.app()
+        app.settings_window.isActiveWindow.return_value = False
+        app.result_thread = Mock(is_recording=True)
+        app.result_thread.isRunning.return_value = True
+        app._begin_model_hold('initial')
+        app.on_cancel_key()
+        app.result_thread.cancel_recording.assert_called_once()
+        self.assertFalse(app._model_hold_pending)
         self.assertFalse(app._model_hold_pending)
 
     def test_next_recording_discards_previous_failed_audio(self):

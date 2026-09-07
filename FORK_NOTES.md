@@ -18,11 +18,13 @@ Restart output is in `${XDG_CACHE_HOME:-~/.cache}/whisper-writer/restart.log`.
 
 The tray's **Update** action runs `./update.sh --check-only` against the `origin` remote
 and current branch. If the checkout is current it opens an information popup; if a newer
-commit exists it changes the tray icon while starting the normal dependency-repair and
-restart path, without a desktop notification. The icon returns to normal after a check
-failure or when no update is available; the latter also opens the information popup. The
-action refuses to update while a recording/transcription is active or a failed recording
-is waiting for retry, so audio work is not interrupted or silently lost.
+commit exists it changes the tray icon while starting the normal dependency-repair path,
+without a desktop notification. Every successful update then automatically restarts the
+app so the new checkout and dependencies are loaded; failed updates do not restart it.
+The icon returns to normal after a check failure or when no update is available; the latter
+also opens the information popup. The action refuses to update while a recording/transcription
+is active or a failed recording is waiting for retry, so audio work is not interrupted or
+silently lost.
 
 The launcher preserves `OPENAI_API_KEY`; `.env` supplies it when absent from the environment.
 A custom endpoint without a key receives a placeholder. `model_options.api.timeout_seconds`
@@ -36,10 +38,16 @@ held first activation press (400 ms) selects the secondary model while keeping c
 later short activation presses stop recording and held presses alternate the model without
 stopping capture. Release a short press to transcribe with the selected model. The active
 model appears in the tray tooltip and the status popup while recording/transcribing.
+Model selection remains explicit: a short activation uses the configured primary model, while a
+held activation switches to the configured secondary model. Model ids with an `.en` suffix are
+English-only, so choose a multilingual model yourself when needed; the app does not substitute
+models based on detected language.
 The common initial prompt is a wide multi-line editor with the clickable OpenAI speech-to-text
-guide below it. An empty prompt uses the tracked natural technical-dictation default, adapted
-from the programming vocabulary example in `faster-whisper-dictation`, so new checkouts and
-older configurations receive the same programming/customer vocabulary bias.
+guide below it. An empty prompt uses the tracked language-neutral technical keyword default;
+this avoids steering automatic language detection toward English. Custom prose should match the
+recording language.
+The previous built-in English sample is recognized and migrated at runtime for existing
+ignored configurations.
 Requests are not retried automatically. Exit/settings restart waits for active worker work
 without blocking Qt; a native model call still has to finish. Complete dictation before an
 external process restart/update, which terminates in-flight work.
@@ -198,7 +206,7 @@ model_options:
     model: deepdml/faster-whisper-large-v3-turbo-ct2
     secondary_model: null
   common:
-    initial_prompt: null  # uses the built-in technical-dictation prompt when empty
+    initial_prompt: null  # uses the built-in language-neutral keyword prompt when empty
     language: null
     temperature: 0.0
   local:
@@ -469,9 +477,9 @@ config. Tracked in git (unlike `config.yaml`, which is gitignored/per-machine) s
 across all three machines on `git pull` — no per-machine setup needed.
 
 `src/glossary.py` loads it (module-level cache) and exposes:
-- `build_initial_prompt()` — flattens `categories` into a comma-joined string, capped at
-  800 chars (Whisper's `initial_prompt`/API `prompt` has a practical token limit; blowing
-  past it just gets silently truncated by the API anyway, so cap client-side instead).
+- `build_initial_prompt()` — flattens language-neutral glossary tokens into a comma-joined
+  string, omitting generic multi-word English phrases, and caps it at 800 chars (Whisper's
+  `initial_prompt`/API `prompt` has a practical token limit; cap client-side instead).
 - `apply_glossary_corrections(text)` — runs after every transcription, in
   `post_process_transcription()` (`src/transcription.py`). Two passes:
   1. `static_map`: unconditional case-insensitive phrase replace (e.g. `"eye dock"` →
@@ -495,7 +503,9 @@ one edit of some glossary term and isn't a trigger could still misfire) — miti
 gating on triggers in the first place and keeping the threshold at 0.90, not lower.
 
 Config path if you want a per-machine override: `model_options.common.initial_prompt` in
-`config.yaml` still exists and takes precedence over the built-in default when non-empty.
+`config.yaml` still exists and takes precedence over the built-in keyword default when non-empty.
+For automatic multilingual detection, use keywords or proper names rather than prose in one
+language; the OpenAI transcription API requires a prose prompt to match the audio language.
 
 Requires `rapidfuzz` (prebuilt wheel, no apt dep — added to `requirements.txt`).
 

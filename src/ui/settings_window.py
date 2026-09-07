@@ -1,20 +1,22 @@
 import os
 import json
+import math
 import subprocess
 import sys
 from dotenv import set_key, load_dotenv
 from PyQt5.QtWidgets import (
-    QApplication, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox,
+    QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox,
     QMessageBox, QShortcut, QTabWidget, QWidget, QSizePolicy, QSpacerItem, QToolButton, QStyle,
-    QFileDialog, QTextEdit, QGroupBox
+    QFileDialog, QTextEdit, QGroupBox, QScrollArea, QFrame
 )
-from PyQt5.QtCore import Qt, QCoreApplication, QProcess, QTimer, QUrl, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QIcon, QKeySequence
 from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from ui.base_window import BaseWindow
 from utils import ConfigManager
+import glossary
 
 load_dotenv()
 
@@ -30,6 +32,8 @@ class SettingsWindow(BaseWindow):
     def __init__(self):
         """Initialize the settings window."""
         super().__init__('Settings', 760, 700, frameless=False)
+        self.main_layout.setContentsMargins(18, 18, 18, 14)
+        self.main_layout.setSpacing(14)
         self.setWindowIcon(QIcon(os.path.join('assets', 'ww-logo.png')))
         self.schema = ConfigManager.get_schema()
         # Set to True by main.py once the app's other components exist — on a first run
@@ -94,13 +98,28 @@ class SettingsWindow(BaseWindow):
 
     def create_tabs(self):
         """Create tabs for each category in the schema."""
+        titles = {'model_options': 'Transcription', 'recording_options': 'Recording',
+                  'post_processing': 'Text output', 'misc': 'General'}
         for category, settings in self.schema.items():
             tab = QWidget()
             tab_layout = QVBoxLayout()
             tab.setLayout(tab_layout)
-            self.tabs.addTab(tab, category.replace('_', ' ').capitalize())
+            tab_layout.setContentsMargins(12, 14, 12, 14)
+            tab_layout.setSpacing(14)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            scroll.setWidget(tab)
+            self.tabs.addTab(scroll, titles.get(category, category.replace('_', ' ').capitalize()))
 
             self.create_settings_widgets(tab_layout, category, settings)
+            labels = [label for label in tab.findChildren(QLabel)
+                      if label.objectName().endswith('_label')]
+            if labels:
+                label_width = min(240, max(label.fontMetrics().horizontalAdvance(label.text()) for label in labels) + 8)
+                for label in labels:
+                    label.setWordWrap(True)
+                    label.setFixedWidth(label_width)
             tab_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
 
     def create_about_tab(self):
@@ -128,12 +147,15 @@ class SettingsWindow(BaseWindow):
             version_text += f" ({commit_date})"
         if ahead_count and ahead_count.isdigit():
             version_text += f" — {ahead_count} commit(s) ahead of upstream"
-        layout.addWidget(QLabel(version_text))
+        version_label = QLabel(version_text)
+        version_label.setWordWrap(True)
+        layout.addWidget(version_label)
 
         origin_url = self.github_web_url(self.git_info(['remote', 'get-url', 'origin']))
         if origin_url:
             fork_label = QLabel(f'This fork: <a href="{origin_url}">{origin_url}</a>')
             fork_label.setOpenExternalLinks(True)
+            fork_label.setWordWrap(True)
             fork_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
             layout.addWidget(fork_label)
         else:
@@ -143,6 +165,7 @@ class SettingsWindow(BaseWindow):
         if upstream_url:
             upstream_label = QLabel(f'Forked from (upstream): <a href="{upstream_url}">{upstream_url}</a>')
             upstream_label.setOpenExternalLinks(True)
+            upstream_label.setWordWrap(True)
             upstream_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
             layout.addWidget(upstream_label)
 
@@ -178,48 +201,65 @@ class SettingsWindow(BaseWindow):
 
     def create_settings_widgets(self, layout, category, settings):
         """Create widgets for each setting in a category."""
-        deferred_prompt = None
+        if category == 'model_options':
+            self.add_setting_widget(layout, 'use_api', settings['use_api'], category)
+            self.create_api_model_group(layout, settings['api'])
+            self.local_model_group = self._settings_group(
+                layout, 'Local model', category, settings['local'], sub_category='local')
+            self._settings_group(layout, 'Transcription options', category, settings['common'],
+                                 keys=('language', 'temperature'), sub_category='common')
+            self._settings_group(layout, 'Prompt context (optional)', category, settings['common'],
+                                 keys=('initial_prompt',), sub_category='common')
+            return
+        groups = {
+            'recording_options': (
+                ('Activation', ('activation_key', 'recording_mode', 'input_backend')),
+                ('Microphone', ('sound_device', 'sample_rate')),
+                ('Timing', ('silence_duration', 'min_duration'))),
+            'post_processing': (
+                ('Text formatting', ('remove_trailing_period', 'add_trailing_space', 'remove_capitalization')),
+                ('Text insertion', ('input_method', 'writing_key_press_delay'))),
+            'misc': (
+                ('Status indicators', ('hide_status_window', 'status_window_position', 'show_tray_status_icon')),
+                ('Sounds', ('play_toggle_sounds', 'toggle_sound_volume', 'noise_on_completion')),
+                ('Diagnostics', ('print_to_terminal',))),
+        }
+        if category in groups:
+            for title, keys in groups[category]:
+                self._settings_group(layout, title, category, settings, keys=keys)
+            return
         for sub_category, sub_settings in settings.items():
             if isinstance(sub_settings, dict) and 'value' in sub_settings:
                 self.add_setting_widget(layout, sub_category, sub_settings, category)
-            elif category == 'model_options' and sub_category == 'api':
-                self.create_api_model_group(layout, sub_settings)
-                for key in ('timeout_seconds', 'api_key'):
-                    if key in sub_settings:
-                        self.add_setting_widget(layout, key, sub_settings[key], category, sub_category)
             else:
                 for key, meta in sub_settings.items():
-                    if category == 'model_options' and sub_category == 'common' and key == 'initial_prompt':
-                        deferred_prompt = (key, meta, sub_category)
-                        continue
                     self.add_setting_widget(layout, key, meta, category, sub_category)
 
-        if deferred_prompt:
-            key, meta, sub_category = deferred_prompt
-            layout.addSpacing(28)
-            prompt_heading = QLabel('Prompt context (optional)')
-            prompt_heading.setObjectName('model_options_common_initial_prompt_heading')
-            prompt_font = prompt_heading.font()
-            prompt_font.setBold(True)
-            prompt_heading.setFont(prompt_font)
-            layout.addWidget(prompt_heading)
-            self.add_setting_widget(layout, key, meta, category, sub_category)
+    def _settings_group(self, layout, title, category, settings, keys=None, sub_category=None):
+        group = QGroupBox(title)
+        group_layout = QVBoxLayout(group)
+        group_layout.setContentsMargins(12, 16, 12, 12)
+        group_layout.setSpacing(10)
+        for key in keys if keys is not None else settings:
+            self.add_setting_widget(group_layout, key, settings[key], category, sub_category)
+        layout.addWidget(group)
+        return group
 
     def create_api_model_group(self, layout, settings):
         """Group the endpoint and model selectors into one compact model box."""
         group = QGroupBox('API model selection')
         group.setObjectName('model_options_api_models_group')
         group_layout = QVBoxLayout(group)
-        group_layout.setContentsMargins(10, 10, 10, 10)
-        group_layout.setSpacing(6)
+        group_layout.setContentsMargins(12, 16, 12, 12)
+        group_layout.setSpacing(10)
 
-        # The schema order keeps the endpoint above the primary and secondary selectors.
+        # Connection details precede model choices; discovery sits below both selectors.
         self.api_model_combos = []
-        for key, meta in settings.items():
-            if key in ('base_url', 'model', 'secondary_model'):
-                self.add_setting_widget(group_layout, key, meta, 'model_options', 'api')
+        for key in ('base_url', 'api_key', 'model', 'secondary_model'):
+            self.add_setting_widget(group_layout, key, settings[key], 'model_options', 'api')
 
         group_layout.addWidget(self.create_api_model_refresh_controls())
+        self.add_setting_widget(group_layout, 'timeout_seconds', settings['timeout_seconds'], 'model_options', 'api')
         layout.addWidget(group)
         self.api_model_group = group
 
@@ -258,7 +298,7 @@ class SettingsWindow(BaseWindow):
         button_row = QHBoxLayout()
         button_row.addStretch(1)
 
-        reset_button = QPushButton('Reset')
+        reset_button = QPushButton('Discard changes')
         reset_button.setToolTip('Discard unsaved changes and reload the last saved settings')
         reset_button.clicked.connect(self.reset_settings)
         button_row.addWidget(reset_button)
@@ -275,10 +315,24 @@ class SettingsWindow(BaseWindow):
         display_names = {
             ('model_options', 'api', 'model'): 'Primary model',
             ('model_options', 'api', 'secondary_model'): 'Secondary model',
+            ('model_options', 'api', 'base_url'): 'Server URL',
+            ('model_options', 'api', 'api_key'): 'API key',
+            ('model_options', 'api', 'timeout_seconds'): 'Request timeout (s)',
+            ('model_options', None, 'use_api'): 'Use API server',
+            ('model_options', 'local', 'condition_on_previous_text'): 'Use previous context',
+            ('model_options', 'local', 'vad_filter'): 'Filter silence',
+            ('recording_options', None, 'activation_key'): 'Keyboard shortcut',
+            ('recording_options', None, 'sound_device'): 'Microphone index',
+            ('recording_options', None, 'sample_rate'): 'Sample rate (Hz)',
+            ('recording_options', None, 'silence_duration'): 'Silence before stop (ms)',
+            ('recording_options', None, 'min_duration'): 'Minimum recording (ms)',
+            ('post_processing', None, 'writing_key_press_delay'): 'Delay between keys (s)',
+            ('misc', None, 'toggle_sound_volume'): 'Toggle sound volume (%)',
         }
         label_text = display_names.get((category, sub_category, key), key.replace('_', ' ').capitalize())
         label = QLabel(f"{label_text}:")
-        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        label.setMinimumWidth(195)
+        label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
 
         widget = self.create_widget_for_type(key, meta, category, sub_category)
         if not widget:
@@ -287,15 +341,15 @@ class SettingsWindow(BaseWindow):
         help_button = self.create_help_button(meta.get('description', ''))
         is_prompt = category == 'model_options' and sub_category == 'common' and key == 'initial_prompt'
 
-        item_layout.addWidget(label)
+        item_layout.setSpacing(10)
+        if not is_prompt:
+            item_layout.addWidget(label)
         if isinstance(widget, QWidget):
             if is_prompt:
-                label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
                 widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-                widget.setMinimumWidth(500)
                 item_layout.addWidget(widget, 1)
             else:
-                item_layout.addWidget(widget)
+                item_layout.addWidget(widget, 1)
         else:
             item_layout.addLayout(widget)
         item_layout.addWidget(help_button)
@@ -314,6 +368,8 @@ class SettingsWindow(BaseWindow):
         help_name = f"{category}_{sub_category}_{key}_help" if sub_category else f"{category}_{key}_help"
         
         label.setObjectName(label_name)
+        if is_prompt:
+            label.deleteLater()
         help_button.setObjectName(help_name)
         
         if isinstance(widget, QWidget):
@@ -336,7 +392,8 @@ class SettingsWindow(BaseWindow):
         if meta_type == 'bool':
             return self.create_checkbox(current_value, key)
         elif meta_type == 'str' and 'options' in meta:
-            return self.create_combobox(current_value, meta['options'])
+            return self.create_combobox(current_value, meta['options'], readable=key in (
+                'recording_mode', 'input_backend', 'input_method', 'status_window_position'))
         elif meta_type == 'str':
             return self.create_line_edit(current_value, key)
         elif meta_type in ['int', 'float']:
@@ -350,10 +407,11 @@ class SettingsWindow(BaseWindow):
             widget.setObjectName('model_options_use_api_input')
         return widget
 
-    def create_combobox(self, value, options):
+    def create_combobox(self, value, options, readable=False):
         widget = QComboBox()
-        widget.addItems(options)
-        widget.setCurrentText(value)
+        for option in options:
+            widget.addItem(option.replace('_', ' ').capitalize() if readable else option, option)
+        widget.setCurrentIndex(widget.findData(value))
         return widget
 
     def create_api_model_selector(self, value, primary=False):
@@ -364,6 +422,8 @@ class SettingsWindow(BaseWindow):
 
         combo = QComboBox(container)
         combo.setEditable(True)
+        combo.setMinimumContentsLength(12)
+        combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         combo.setInsertPolicy(QComboBox.NoInsert)
         combo.setObjectName(
             'model_options_api_model_selector'
@@ -372,6 +432,7 @@ class SettingsWindow(BaseWindow):
         if not primary:
             combo.addItem('')
             combo.setPlaceholderText('Disabled — use primary model')
+            combo.lineEdit().setPlaceholderText('Disabled — use primary model')
         if value:
             combo.addItem(str(value))
             combo.setCurrentText(str(value))
@@ -385,6 +446,8 @@ class SettingsWindow(BaseWindow):
 
     def create_line_edit(self, value, key=None):
         widget = QLineEdit(value)
+        if key in ('language', 'sound_device'):
+            widget.setPlaceholderText('Automatic' if key == 'language' else 'System default')
         if key == 'api_key':
             widget.setEchoMode(QLineEdit.Password)
             widget.setText(os.getenv('OPENAI_API_KEY') or value)
@@ -437,8 +500,12 @@ class SettingsWindow(BaseWindow):
 
     def get_config_value(self, category, sub_category, key, meta):
         if sub_category:
-            return ConfigManager.get_config_value(category, sub_category, key) or meta['value']
-        return ConfigManager.get_config_value(category, key) or meta['value']
+            value = ConfigManager.get_config_value(category, sub_category, key)
+        else:
+            value = ConfigManager.get_config_value(category, key)
+        if category == 'model_options' and sub_category == 'common' and key == 'initial_prompt':
+            return glossary.normalize_initial_prompt(value)
+        return value if value is not None else meta['value']
 
     def browse_model_path(self, widget):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select Whisper Model File", "", "Model Files (*.bin);;All Files (*)")
@@ -454,6 +521,8 @@ class SettingsWindow(BaseWindow):
         self.toggle_api_local_options(use_api)
         if getattr(self, 'api_model_group', None):
             self.api_model_group.setVisible(bool(use_api))
+        if getattr(self, 'local_model_group', None):
+            self.local_model_group.setVisible(not bool(use_api))
         if use_api:
             self._schedule_model_refresh()
         else:
@@ -462,6 +531,7 @@ class SettingsWindow(BaseWindow):
 
     def _schedule_model_refresh(self):
         """Debounce URL edits so a pasted/typed endpoint triggers one model request."""
+        self._cancel_model_discovery()
         if self.use_api_checkbox and self.use_api_checkbox.isChecked():
             self.model_refresh_debounce.start()
 
@@ -613,6 +683,11 @@ class SettingsWindow(BaseWindow):
         """Save the settings to the config file and .env file. If nothing actually changed,
         this is a no-op close. If every changed setting is schema-flagged `live_reload: true`
         and the app's components already exist, apply them in place instead of restarting."""
+        try:
+            self.collect_current_values()
+        except ValueError as error:
+            QMessageBox.warning(self, 'Invalid setting', str(error))
+            return
         changed = self.changed_settings()
         if not changed:
             self.close()
@@ -649,6 +724,7 @@ class SettingsWindow(BaseWindow):
 
     def reset_settings(self):
         """Reset the settings to the saved values."""
+        self._cancel_model_discovery()
         ConfigManager.reload_config()
         self.update_widgets_from_config()
         self.baseline_values = self.collect_current_values()
@@ -658,7 +734,10 @@ class SettingsWindow(BaseWindow):
         values = {}
 
         def collect(widget, category, sub_category, key, meta):
-            values[(category, sub_category, key)] = self.get_widget_value_typed(widget, meta.get('type'))
+            try:
+                values[(category, sub_category, key)] = self.get_widget_value_typed(widget, meta.get('type'))
+            except ValueError:
+                raise ValueError(f'{key.replace("_", " ").capitalize()}: enter a valid {meta.get("type")} value.') from None
 
         self.iterate_settings(collect)
         return values
@@ -669,7 +748,11 @@ class SettingsWindow(BaseWindow):
         changed = []
 
         def check(widget, category, sub_category, key, meta):
-            current = self.get_widget_value_typed(widget, meta.get('type'))
+            try:
+                current = self.get_widget_value_typed(widget, meta.get('type'))
+            except ValueError:
+                changed.append((category, sub_category, key, meta))
+                return
             if current != self.baseline_values.get((category, sub_category, key)):
                 changed.append((category, sub_category, key, meta))
 
@@ -687,6 +770,9 @@ class SettingsWindow(BaseWindow):
         else:
             config_value = ConfigManager.get_config_value(category, key)
 
+        if (category, sub_category, key) == ('model_options', 'api', 'api_key'):
+            config_value = os.getenv('OPENAI_API_KEY') or config_value
+
         self.set_widget_value(widget, config_value, meta.get('type'))
 
     def set_widget_value(self, widget, value, value_type):
@@ -694,7 +780,11 @@ class SettingsWindow(BaseWindow):
         if isinstance(widget, QCheckBox):
             widget.setChecked(value)
         elif isinstance(widget, QComboBox):
-            widget.setCurrentText(str(value) if value is not None else '')
+            index = widget.findData(value)
+            if index >= 0:
+                widget.setCurrentIndex(index)
+            else:
+                widget.setCurrentText(str(value) if value is not None else '')
         elif isinstance(widget, QLineEdit):
             widget.setText(str(value) if value is not None else '')
         elif isinstance(widget, QTextEdit):
@@ -713,13 +803,16 @@ class SettingsWindow(BaseWindow):
         if isinstance(widget, QCheckBox):
             return widget.isChecked()
         elif isinstance(widget, QComboBox):
-            return widget.currentText() or None
+            return widget.currentData() if widget.currentData() is not None else widget.currentText() or None
         elif isinstance(widget, QLineEdit):
             text = widget.text()
             if value_type == 'int':
                 return int(text) if text else None
             elif value_type == 'float':
-                return float(text) if text else None
+                value = float(text) if text else None
+                if value is not None and not math.isfinite(value):
+                    raise ValueError('Expected a finite number')
+                return value
             else:
                 return text or None
         elif isinstance(widget, QTextEdit):
@@ -791,8 +884,9 @@ class SettingsWindow(BaseWindow):
             if reply != QMessageBox.Yes:
                 event.ignore()
                 return
-            ConfigManager.reload_config()  # Revert to last saved configuration
-            self.update_widgets_from_config()
+            self.reset_settings()
 
+        self.model_refresh_debounce.stop()
+        self._cancel_model_discovery()
         self.settings_closed.emit()
         super().closeEvent(event)

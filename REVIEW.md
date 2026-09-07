@@ -5,6 +5,42 @@ configuration, dependency set and pull-based deployment. Changes are intended fo
 Ubuntu/X11 installations described in FORK_NOTES.md. This is a targeted code review and
 installed-package audit, not a guarantee that all vulnerabilities or hardware faults are covered.
 
+## End-of-day follow-up
+
+Reviewed all 12 September 6 commits (`93ea665..db56e26`) and their combined behavior.
+The original 49 headless tests passed before these additional corrections:
+
+- Preserve complete microphone callback frames still queued when capture stops; close
+  the stream even if stopping it raises, and convert a configured microphone index to an integer.
+- Freeze model selection atomically when capture ends or is cancelled. Cancel pending
+  hold timers on Escape/stop, and accept Escape before the queued recording status arrives.
+- Restore the effective API key when discarding Settings edits. Invalid numeric text now
+  shows a validation message on Save and can still be discarded. Invalidate model discovery
+  replies immediately when the endpoint changes, and cancel discovery when Settings closes.
+- Supervise tray updates through completion. Recheck active/recoverable audio after the
+  asynchronous Git check, block recording during installation, report install failures,
+  and defer Exit/restart until installation finishes. The tray uses `--no-restart`; the
+  standalone updater retains its usual restart behavior. This does not add deployment rollback.
+- Replace the existing process on a Settings/update restart, releasing its old instance
+  lock on exec. Avoid initializing components twice when running with unsaved defaults.
+- Reorganize Settings into Transcription, Recording, Text output and General tabs with
+  named groups, aligned fields, units, readable choices and scrollable content. Prompt
+  context has its own full-width editor; API/local groups follow the selected backend.
+
+Follow-up verification: 67 headless regression tests and 8 isolated X11 checks pass.
+The suite includes real Git checks against a temporary local repository for dirty,
+ahead and divergent installations, and supervised-update checks without restarting
+the actual application. Installed dependency consistency, Python compilation and shell
+syntax pass. Offscreen Settings renders were inspected. The running app and its real
+configuration were not restarted or modified; microphone/NAS/GPU behavior still needs
+normal-use testing. The older verification counts below describe earlier review stages.
+
+The multilingual follow-up also replaces the English prose prompt with glossary keywords and
+migrates that earlier built-in prompt at runtime for existing ignored configs. Model selection is
+explicit: a short activation uses the configured primary model, while a held activation switches
+to the configured secondary model. The app does not substitute models based on detected language,
+so an English-only primary remains a deliberate choice for fast English dictation.
+
 ## Fixed in this review
 
 | Priority | Finding and effect | Correction |
