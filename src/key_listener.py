@@ -262,6 +262,10 @@ class KeyChord:
         self.pressed_keys: Set[KeyCode] = set()
         self.pressed_at = {}
         self._chord_keys = set()
+        # Modifier groups (e.g. CTRL, SHIFT) must all be held down before any of the
+        # non-modifier "trigger" keys (e.g. SPACE, K) is pressed. See _check_key_order.
+        self._modifier_groups = [key for key in keys if isinstance(key, frozenset)]
+        self._trigger_keys = {key for key in keys if not isinstance(key, frozenset)}
         for key in keys:
             if isinstance(key, frozenset):
                 self._chord_keys.update(key)
@@ -271,6 +275,9 @@ class KeyChord:
         # alongside part of the chord (e.g. the modifiers of another app's shortcut),
         # until every key is released.
         self._disarmed = False
+        # See _check_key_order: True once a trigger key was pressed before all modifier
+        # groups were already held down, until every key is released.
+        self._order_violated = False
 
     def update(self, key: KeyCode, event_type: InputEvent) -> bool:
         """Update the state of pressed keys and check if the chord is active."""
@@ -278,6 +285,7 @@ class KeyChord:
 
         if event_type == InputEvent.KEY_PRESS:
             self._disarm_on_foreign_key(key)
+            self._check_key_order(key)
             self.pressed_keys.add(key)
             self.pressed_at[key] = time.monotonic()
         elif event_type == InputEvent.KEY_RELEASE:
@@ -285,8 +293,27 @@ class KeyChord:
             self.pressed_at.pop(key, None)
             if not self.pressed_keys:
                 self._disarmed = False
+                self._order_violated = False
 
         return self.is_active()
+
+    def _check_key_order(self, key: KeyCode):
+        """
+        Guard against completing the chord in the wrong order, e.g. Space held down out of
+        habit and then Ctrl+Shift pressed for an unrelated reason: without this, that would
+        complete an exact match against Ctrl+Shift+Space and fire activation the user never
+        intended. The modifiers (Ctrl+Shift) must already be held down before the trigger key
+        (Space) is pressed; if the trigger key comes first, the chord is disarmed until it is
+        released completely (see `update`) — the user must press the whole combination fresh,
+        modifiers first.
+        """
+        if key not in self._trigger_keys:
+            return
+        for group in self._modifier_groups:
+            if not (self.pressed_keys & group):
+                logger.debug("key event: disarming chord due to trigger key pressed before modifiers")
+                self._order_violated = True
+                return
 
     def _disarm_on_foreign_key(self, key: KeyCode):
         """
@@ -332,7 +359,7 @@ class KeyChord:
 
     def is_active(self) -> bool:
         """Check if exactly the keys in the chord are currently pressed (no extras)."""
-        if self._disarmed:
+        if self._disarmed or self._order_violated:
             return False
         allowed_keys = set()
         for key in self.keys:

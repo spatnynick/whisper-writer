@@ -60,6 +60,30 @@ class KeyChordTests(unittest.TestCase):
         chord.update(KeyCode.K, InputEvent.KEY_RELEASE)
         self.assertFalse(chord.update(KeyCode.SPACE, InputEvent.KEY_PRESS))
 
+    def test_trigger_key_pressed_before_modifiers_does_not_activate(self):
+        """Space held down first, then Ctrl+Shift pressed for an unrelated reason, should
+        not complete this chord even though all three keys end up pressed together."""
+        chord = make_ctrl_shift_space_chord()
+        chord.update(KeyCode.SPACE, InputEvent.KEY_PRESS)
+        chord.update(KeyCode.CTRL_LEFT, InputEvent.KEY_PRESS)
+        self.assertFalse(chord.update(KeyCode.SHIFT_LEFT, InputEvent.KEY_PRESS))
+
+    def test_trigger_key_before_modifiers_rearms_after_full_release(self):
+        chord = make_ctrl_shift_space_chord()
+        chord.update(KeyCode.SPACE, InputEvent.KEY_PRESS)
+        chord.update(KeyCode.CTRL_LEFT, InputEvent.KEY_PRESS)
+        chord.update(KeyCode.SHIFT_LEFT, InputEvent.KEY_PRESS)
+        self.assertFalse(chord.is_active())
+
+        chord.update(KeyCode.SPACE, InputEvent.KEY_RELEASE)
+        chord.update(KeyCode.CTRL_LEFT, InputEvent.KEY_RELEASE)
+        chord.update(KeyCode.SHIFT_LEFT, InputEvent.KEY_RELEASE)
+
+        # Fully released; pressing modifiers first now should work.
+        chord.update(KeyCode.CTRL_LEFT, InputEvent.KEY_PRESS)
+        chord.update(KeyCode.SHIFT_LEFT, InputEvent.KEY_PRESS)
+        self.assertTrue(chord.update(KeyCode.SPACE, InputEvent.KEY_PRESS))
+
 
 if __name__ == '__main__':
     unittest.main()
