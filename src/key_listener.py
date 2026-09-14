@@ -267,19 +267,41 @@ class KeyChord:
                 self._chord_keys.update(key)
             else:
                 self._chord_keys.add(key)
+        # See _disarm_on_foreign_key: True while a key outside this chord was pressed
+        # alongside part of the chord (e.g. the modifiers of another app's shortcut),
+        # until every key is released.
+        self._disarmed = False
 
     def update(self, key: KeyCode, event_type: InputEvent) -> bool:
         """Update the state of pressed keys and check if the chord is active."""
         self._purge_stale_extras()
 
         if event_type == InputEvent.KEY_PRESS:
+            self._disarm_on_foreign_key(key)
             self.pressed_keys.add(key)
             self.pressed_at[key] = time.monotonic()
         elif event_type == InputEvent.KEY_RELEASE:
             self.pressed_keys.discard(key)
             self.pressed_at.pop(key, None)
+            if not self.pressed_keys:
+                self._disarmed = False
 
         return self.is_active()
+
+    def _disarm_on_foreign_key(self, key: KeyCode):
+        """
+        Guard against a different shortcut that shares this chord's modifiers, e.g. holding
+        Ctrl+Shift for Ctrl+Shift+K in another app and then, shortly after releasing K, hitting
+        Space out of habit. Without this, Space alone would complete an exact match against
+        Ctrl+Shift+Space and fire activation the user never intended. Once a key outside the
+        chord is pressed while any chord key is already down, the chord is disarmed until it is
+        released completely (see `update`) — the user must press the whole combination fresh.
+        """
+        if key in self._chord_keys:
+            return
+        if self.pressed_keys & self._chord_keys:
+            logger.debug("key event: disarming chord due to an unrelated key pressed alongside it")
+            self._disarmed = True
 
     def _purge_stale_extras(self):
         """
@@ -301,8 +323,17 @@ class KeyChord:
             self.pressed_keys.discard(key)
             self.pressed_at.pop(key, None)
 
+        # If a foreign key that triggered _disarm_on_foreign_key turns out to have been a
+        # lost release event rather than a real, recent press, don't hold the chord disarmed
+        # forever waiting for a release that will never come — same self-healing rationale as
+        # the purge above.
+        if stale and self._disarmed and not (self.pressed_keys - self._chord_keys):
+            self._disarmed = False
+
     def is_active(self) -> bool:
         """Check if exactly the keys in the chord are currently pressed (no extras)."""
+        if self._disarmed:
+            return False
         allowed_keys = set()
         for key in self.keys:
             if isinstance(key, frozenset):
