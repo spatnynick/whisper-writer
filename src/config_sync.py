@@ -103,6 +103,7 @@ SYNC_AREA_PATHS = {
         ('misc', 'show_tray_status_icon'),
         ('misc', 'play_toggle_sounds'),
         ('misc', 'toggle_sound_volume'),
+        ('misc', 'update_check_interval_hours'),
     ),
 }
 

@@ -68,6 +68,9 @@ class ReliabilityTests(unittest.TestCase):
         app._sync_settings = default_sync_settings()
         app._sync_needs_attention = False
         app._sync_timer = QTimer()
+        app._update_available = False
+        app._background_update_check_process = None
+        app._update_check_timer = QTimer()
         app.local_model = None
         app.result_thread = None
         app.current_status = 'idle'
@@ -168,6 +171,80 @@ class ReliabilityTests(unittest.TestCase):
             with patch('main.QProcess') as process:
                 app._start_update()
             process.assert_not_called()
+
+    def test_background_update_check_runs_check_only_silently(self):
+        app = self.app()
+        with patch('main.QProcess') as process:
+            app._run_background_update_check()
+        process.return_value.start.assert_called_once_with(os.path.abspath('update.sh'), ['--check-only'])
+        app.update_action.setEnabled.assert_not_called()
+        app.tray_icon.setIcon.assert_not_called()
+
+    def test_background_update_check_skipped_while_manual_update_running(self):
+        app = self.app()
+        app._update_process = Mock()
+        app._update_process.state.return_value = QProcess.Running
+        with patch('main.QProcess') as process:
+            app._run_background_update_check()
+        process.assert_not_called()
+
+    def test_background_update_check_available_sets_marker_and_tooltip(self):
+        app = self.app()
+        process = Mock()
+        process.readAllStandardOutput.return_value = b'UPDATE_AVAILABLE\n'
+        app._background_update_check_process = process
+        app._on_background_update_check_finished(10, None)
+        self.assertTrue(app._update_available)
+        app.tray_icon.setToolTip.assert_called_with('WhisperWriter — Idle — Update available')
+
+    def test_background_update_check_current_clears_marker(self):
+        app = self.app()
+        app._update_available = True
+        process = Mock()
+        process.readAllStandardOutput.return_value = b'NO_UPDATE\n'
+        app._background_update_check_process = process
+        app._on_background_update_check_finished(0, None)
+        self.assertFalse(app._update_available)
+
+    def test_starting_update_clears_stale_available_marker(self):
+        app = self.app()
+        app._update_available = True
+        with patch('main.QProcess'):
+            app._start_update()
+        self.assertFalse(app._update_available)
+
+    def test_update_check_interval_timer_honors_config_and_zero_disables(self):
+        app = self.app()
+        ConfigManager.set_config_value(2, 'misc', 'update_check_interval_hours')
+        app._configure_update_check_timer()
+        self.assertTrue(app._update_check_timer.isActive())
+        self.assertEqual(app._update_check_timer.interval(), 2 * 3600 * 1000)
+
+        ConfigManager.set_config_value(0, 'misc', 'update_check_interval_hours')
+        app._configure_update_check_timer()
+        self.assertFalse(app._update_check_timer.isActive())
+
+    def test_update_check_timer_runs_immediate_check_on_startup(self):
+        app = self.app()
+        ConfigManager.set_config_value(2, 'misc', 'update_check_interval_hours')
+        with patch.object(QTimer, 'singleShot') as single_shot:
+            app._configure_update_check_timer(check_now=True)
+        single_shot.assert_called_once()
+        self.assertEqual(single_shot.call_args.args[1], app._run_background_update_check)
+
+    def test_update_check_timer_reconfigure_without_check_now_stays_silent(self):
+        app = self.app()
+        ConfigManager.set_config_value(2, 'misc', 'update_check_interval_hours')
+        with patch.object(QTimer, 'singleShot') as single_shot:
+            app._configure_update_check_timer()
+        single_shot.assert_not_called()
+
+    def test_update_check_timer_disabled_skips_immediate_check(self):
+        app = self.app()
+        ConfigManager.set_config_value(0, 'misc', 'update_check_interval_hours')
+        with patch.object(QTimer, 'singleShot') as single_shot:
+            app._configure_update_check_timer(check_now=True)
+        single_shot.assert_not_called()
 
     def test_updating_blocks_recording_and_defers_exit(self):
         app = self.app()

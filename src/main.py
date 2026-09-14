@@ -97,12 +97,17 @@ class WhisperWriterApp(QObject):
         self._sync_needs_attention = False
         self._sync_timer = QTimer(self)
         self._sync_timer.timeout.connect(self._on_sync_timer)
+        self._update_available = False
+        self._background_update_check_process = None
+        self._update_check_timer = QTimer(self)
+        self._update_check_timer.timeout.connect(self._run_background_update_check)
         self.activationRequested.connect(self.on_activation, Qt.QueuedConnection)
         self.deactivationRequested.connect(self.on_deactivation, Qt.QueuedConnection)
         self.cancelRequested.connect(self.on_cancel_key, Qt.QueuedConnection)
         ConfigManager.initialize()
         self._sync_settings = load_sync_settings()
         self._sync_needs_attention = self._sync_settings.get('status') == SYNC_STATUS_ERROR
+        self._configure_update_check_timer(check_now=True)
 
         self.settings_window = SettingsWindow()
         self.settings_window.settings_closed.connect(self.on_settings_closed)
@@ -719,6 +724,7 @@ class WhisperWriterApp(QObject):
         self._clear_update_process()
 
         if exit_code == 0 and 'NO_UPDATE' in output:
+            self._set_update_available(False)
             self._restore_update_indicator()
             self._show_update_message('WhisperWriter', 'No update available. This installation is current.')
             return
@@ -739,6 +745,7 @@ class WhisperWriterApp(QObject):
         if self._shutdown_action or self.result_thread is not None or self.failed_recordings:
             self._restore_update_indicator()
             return
+        self._set_update_available(False)
         self.update_action.setEnabled(False)
         self._set_update_indicator('updating')
         process = QProcess(self)
@@ -775,21 +782,100 @@ class WhisperWriterApp(QObject):
         if self._shutdown_action:
             self._finish_shutdown()
 
-    def _tray_icon_with_sync_marker(self, icon):
-        """Overlay a small red sync marker on the idle icon when sync needs attention."""
-        if not getattr(self, '_sync_needs_attention', False):
+    def _configure_update_check_timer(self, check_now=False):
+        """
+        Apply the configured misc.update_check_interval_hours to the background timer.
+        With check_now, also fire one background check shortly after (used at startup, so
+        an already-available update shows up on the tray icon without waiting a full
+        interval) — subsequent checks then follow the normal configured cadence.
+        """
+        timer = getattr(self, '_update_check_timer', None)
+        if timer is None:
+            return
+        timer.stop()
+        hours = ConfigManager.get_config_value('misc', 'update_check_interval_hours') or 0
+        if hours > 0:
+            # QTimer uses a signed 32-bit millisecond interval; extremely long intervals
+            # are simply capped by Qt.
+            timer.start(min(hours * 3600 * 1000, 2_147_000_000))
+            if check_now:
+                QTimer.singleShot(3000, self._run_background_update_check)
+
+    def _run_background_update_check(self):
+        """
+        Silently check origin/<current branch> — the same source the tray Update button
+        uses — without blocking the GUI or touching the checkout. Never installs an update
+        by itself; it only updates the tray marker (see _set_update_available) so the user
+        can start the update manually from the tray.
+        """
+        if self._shutdown_action:
+            return
+        if self._update_process and self._update_process.state() != QProcess.NotRunning:
+            return  # a manual check/update is already using the checkout
+        if self._background_update_check_process and self._background_update_check_process.state() != QProcess.NotRunning:
+            return
+        process = QProcess(self)
+        process.setWorkingDirectory(PROJECT_ROOT)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.finished.connect(self._on_background_update_check_finished)
+        process.errorOccurred.connect(self._on_background_update_check_error)
+        self._background_update_check_process = process
+        process.start(UPDATE_SCRIPT, ['--check-only'])
+
+    def _on_background_update_check_error(self, error):
+        process = self._background_update_check_process
+        if process is None or process.state() != QProcess.NotRunning:
+            return
+        self._background_update_check_process = None
+        process.deleteLater()
+        logger.warning('Background update check failed: %s', error)
+
+    def _on_background_update_check_finished(self, exit_code, exit_status):
+        process = self._background_update_check_process
+        if process is None:
+            return
+        output = bytes(process.readAllStandardOutput()).decode('utf-8', errors='replace')
+        self._background_update_check_process = None
+        process.deleteLater()
+
+        if exit_code == 0 and 'NO_UPDATE' in output:
+            self._set_update_available(False)
+        elif exit_code == 10 and 'UPDATE_AVAILABLE' in output:
+            self._set_update_available(True)
+        else:
+            logger.warning('Background update check exited with code %s: %s', exit_code, output.strip())
+
+    def _set_update_available(self, available):
+        """Track whether an update is known to be available and refresh the tray marker."""
+        if self._update_available == available:
+            return
+        self._update_available = available
+        if getattr(self, 'tray_icon', None):
+            self.update_tray_icon(getattr(self, 'current_status', 'idle'))
+
+    def _tray_icon_with_markers(self, icon):
+        """Overlay small status dots on the idle icon: red (top-right) when sync needs
+        attention, yellow (bottom-right) when a background check found an update."""
+        needs_sync_marker = getattr(self, '_sync_needs_attention', False)
+        needs_update_marker = getattr(self, '_update_available', False)
+        if not needs_sync_marker and not needs_update_marker:
             return icon
         try:
             pixmap = icon.pixmap(64, 64)
             if pixmap.isNull():
                 return icon
             radius = max(4, pixmap.width() // 8)
-            center = QPoint(pixmap.width() - radius - 2, radius + 2)
             painter = QPainter(pixmap)
             painter.setRenderHint(QPainter.Antialiasing)
             painter.setPen(QColor(255, 255, 255))
-            painter.setBrush(QColor(211, 47, 47))
-            painter.drawEllipse(center, radius, radius)
+            if needs_sync_marker:
+                center = QPoint(pixmap.width() - radius - 2, radius + 2)
+                painter.setBrush(QColor(211, 47, 47))
+                painter.drawEllipse(center, radius, radius)
+            if needs_update_marker:
+                center = QPoint(pixmap.width() - radius - 2, pixmap.height() - radius - 2)
+                painter.setBrush(QColor(251, 192, 45))
+                painter.drawEllipse(center, radius, radius)
             painter.end()
             return QIcon(pixmap)
         except (AttributeError, TypeError):
@@ -807,7 +893,7 @@ class WhisperWriterApp(QObject):
         model_suffix = ''
         if status in ('recording', 'transcribing', 'error') and active_model:
             model_suffix = f'\nModel: {active_model}'
-        idle_icon = self._tray_icon_with_sync_marker(self.tray_icon_idle)
+        idle_icon = self._tray_icon_with_markers(self.tray_icon_idle)
         if status != 'error' and not ConfigManager.get_config_value('misc', 'show_tray_status_icon'):
             self.tray_icon.setIcon(idle_icon)
             self.tray_icon.setToolTip(f'WhisperWriter{model_suffix}')
@@ -826,7 +912,8 @@ class WhisperWriterApp(QObject):
         elif status in ('idle', 'cancel'):
             self.tray_icon.setIcon(idle_icon)
             sync_suffix = ' — Sync needs attention' if getattr(self, '_sync_needs_attention', False) else ''
-            self.tray_icon.setToolTip(f'WhisperWriter — Idle{sync_suffix}')
+            update_suffix = ' — Update available' if getattr(self, '_update_available', False) else ''
+            self.tray_icon.setToolTip(f'WhisperWriter — Idle{sync_suffix}{update_suffix}')
 
     def _update_retry_actions(self):
         count = len(self.failed_recordings)
@@ -1018,10 +1105,12 @@ class WhisperWriterApp(QObject):
         `live_reload: true` (see settings_window.py) — no restart needed. Most such settings
         are already read fresh via ConfigManager.get_config_value() at the point of use;
         toggle_sound_volume is the exception since it's cached on the AudioPlayer objects.
+        The update-check interval is also re-applied here since it drives a QTimer.
         """
         toggle_volume = ConfigManager.get_config_value('misc', 'toggle_sound_volume')
         self.recording_start_sound.volume = toggle_volume
         self.recording_stop_sound.volume = toggle_volume
+        self._configure_update_check_timer()
 
     def on_settings_closed(self):
         """

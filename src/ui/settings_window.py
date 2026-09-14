@@ -712,6 +712,7 @@ class SettingsWindow(BaseWindow):
             'misc': (
                 ('Status indicators', ('hide_status_window', 'status_window_position', 'show_tray_status_icon')),
                 ('Sounds', ('play_toggle_sounds', 'toggle_sound_volume', 'noise_on_completion')),
+                ('Updates', ('update_check_interval_hours',)),
                 ('Diagnostics', ('print_to_terminal',))),
         }
         if category in groups:
@@ -823,6 +824,7 @@ class SettingsWindow(BaseWindow):
             ('recording_options', None, 'min_duration'): 'Minimum recording (ms)',
             ('post_processing', None, 'writing_key_press_delay'): 'Delay between keys (s)',
             ('misc', None, 'toggle_sound_volume'): 'Toggle sound volume (%)',
+            ('misc', None, 'update_check_interval_hours'): 'Update check (hours)',
         }
         label_text = display_names.get((category, sub_category, key), key.replace('_', ' ').capitalize())
         label = QLabel(f"{label_text}:")
@@ -845,6 +847,15 @@ class SettingsWindow(BaseWindow):
                 item_layout.addWidget(widget, 1)
             else:
                 item_layout.addWidget(widget, 1)
+                if widget.maximumWidth() < 16777215:  # Qt's default (unset) QWIDGETSIZE_MAX
+                    # A capped-width field (e.g. numeric) no longer wants to grow, so this
+                    # row's own expandingDirections() stops including horizontal — Qt then
+                    # centers the whole row (label included) in the available width instead
+                    # of pinning it to the left like every other row. An explicit trailing
+                    # stretch keeps the row itself horizontally expanding, so its label lines
+                    # up with every other row's and only the leftover space after the field
+                    # moves right.
+                    item_layout.addStretch(1)
         else:
             item_layout.addLayout(widget)
         item_layout.addWidget(help_button)
@@ -892,7 +903,7 @@ class SettingsWindow(BaseWindow):
         elif meta_type == 'str':
             return self.create_line_edit(current_value, key)
         elif meta_type in ['int', 'float']:
-            return self.create_line_edit(str(current_value))
+            return self.create_line_edit(str(current_value), key=key, numeric=True)
         return None
 
     def create_checkbox(self, value, key):
@@ -939,10 +950,16 @@ class SettingsWindow(BaseWindow):
             self.api_model_combo = combo
         return container
 
-    def create_line_edit(self, value, key=None):
+    def create_line_edit(self, value, key=None, numeric=False):
         widget = QLineEdit(value)
+        if numeric:
+            # Plain numbers don't need a full-width field — match the Sync interval field
+            # in the Synchronization tab's Automatic synchronization sub-tab.
+            widget.setMaximumWidth(110)
         if key in ('language', 'sound_device'):
             widget.setPlaceholderText('Automatic' if key == 'language' else 'System default')
+        elif key == 'update_check_interval_hours':
+            widget.setPlaceholderText('0 = disabled')
         if key == 'api_key':
             widget.setEchoMode(QLineEdit.Password)
             widget.setText(os.getenv('OPENAI_API_KEY') or value)

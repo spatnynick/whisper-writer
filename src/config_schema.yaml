@@ -203,3 +203,8 @@ misc:
     type: int
     live_reload: true
     description: "Volume (0-100) of the recording start/stop toggle sounds."
+  update_check_interval_hours:
+    value: 4
+    type: int
+    live_reload: true
+    description: "How often, in hours, to automatically check (in the background) whether an update is available from the same source used by the tray Update button. Set to 0 to disable automatic checks. This never installs an update by itself — it only marks the tray icon so you can start the update manually."
