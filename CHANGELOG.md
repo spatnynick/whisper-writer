@@ -5,12 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
+### Added
+- Settings → About → Application branch: switch this installation to another branch of the
+  fork (e.g. to test a pull request before merging) and back to `main`. The tray Update action
+  follows the selected branch. `update.sh` gained `--switch BRANCH`, `--list-branches` and
+  `--rebuild-venv`.
+- `requirements.in` (direct dependencies) and `tools/lock_requirements.sh`, which generates the
+  pinned `requirements.txt` lock for Python 3.10–3.14.
+
+### Changed
+- Dependencies updated and locked for CPython 3.10–3.14 with ready-made Linux packages: NumPy 2,
+  ctranslate2 4.8 / faster-whisper 1.2, PyAV 18 (the former `av==11.0.0` had no Linux build and
+  was compiled on every install), openai 3.19, webrtcvad-wheels 2.0.14, PyQt5 5.15.11 with Qt
+  5.15.19. About 20 unused packages (PyAutoGUI family, tiktoken, regex, ...) were dropped. Local
+  GPU transcription now needs CUDA 12 with cuDNN 9.
+- `update.sh` follows a branch that was force-pushed on GitHub when the checkout has no commits
+  of its own, reports a branch deleted on GitHub (exit code 11; the tray explains how to switch
+  back), rebuilds a venv whose Python interpreter disappeared (e.g. after a distribution
+  upgrade), and fetches with an explicit refspec so single-branch clones can switch branches.
+
 ### Security
+- No known vulnerabilities in the locked dependencies (pip-audit, 2026-09-24): `anyio` advisories
+  CVE-2026-63374 / CVE-2026-64847 fixed, and the `setuptools<81` cap (PYSEC-2026-3447) removed
+  because `webrtcvad-wheels` no longer needs `pkg_resources`.
 - The API key is bound to the server it was saved for and sent only there, over HTTPS or to
   localhost. A synchronized server URL change requires confirmation before recordings go there.
 - Transcribed text is no longer printed to the terminal/restart log.
 
 ### Fixed
+- Model discovery in Settings works with HTTPS servers again. Qt 5's network stack cannot use
+  OpenSSL 3 (Ubuntu 22.04+), so the model list is now loaded with Python's standard library in a
+  background thread, verified against the system certificate store.
+- A start/stop sound that cannot be played (no audio output or GStreamer plugins) no longer
+  aborts the application in the middle of a recording.
 - Glossary phrase replacements match whole words only ("This is a problem." no longer becomes
   "This iSAProblem.").
 - Settings synchronization merges per setting instead of overwriting whole areas, applies

@@ -714,13 +714,14 @@ class ReliabilityTests(unittest.TestCase):
     def test_endpoint_edit_invalidates_pending_model_response(self):
         settings = SettingsWindow()
         try:
-            reply = Mock()
-            settings.model_discovery_reply = reply
+            settings.model_discovery_pending = True
             request_id = settings.model_discovery_request_id
             settings.api_base_url_input.setText('http://127.0.0.1:9/v1')
-            reply.abort.assert_called_once()
-            settings._on_model_discovery_finished(reply, request_id)
-            reply.readAll.assert_not_called()
+            self.assertFalse(settings.model_discovery_pending)
+            with patch.object(settings, '_replace_api_model_options') as replace:
+                settings._on_model_discovery_finished(
+                    request_id, {'status': 200, 'body': b'{"data": [{"id": "stale"}]}', 'error': None})
+            replace.assert_not_called()
         finally:
             settings.reset_settings()
             settings.close()

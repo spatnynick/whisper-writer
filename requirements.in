@@ -1,0 +1,43 @@
+# Direct dependencies of WhisperWriter. requirements.txt is the pinned lock generated from
+# this file; edit here, then regenerate the lock (see "Updating dependencies" in README.md):
+#
+#   uv pip compile requirements.in --universal --python-version 3.10 \
+#       --no-emit-package pygobject --no-emit-package pyaudio \
+#       --no-header --no-annotate -o requirements.txt
+#
+# Supported: CPython 3.10-3.14 on Linux (Ubuntu 22.04 through 26.04).
+
+# GUI, tray, settings and model discovery
+PyQt5>=5.15.11,<5.16
+# Qt 5.15.2 cannot load OpenSSL 3, so HTTPS model discovery failed on Ubuntu 22.04+.
+PyQt5-Qt5>=5.15.16,<5.16
+
+# Keyboard hotkeys, typing and the X11 Escape grab
+pynput>=1.7.6,<2
+python-xlib>=0.33; sys_platform == "linux"
+
+# Recording, voice activity detection and WAV encoding
+pyaudio>=0.2.14,<0.3
+webrtcvad-wheels>=2.0.14
+soundfile>=0.12.1
+numpy>=1.26
+
+# Sound effects: audioplayer's Linux backend uses GStreamer through PyGObject.
+audioplayer==0.6
+PyGObject>=3.42,<4
+
+# Transcription
+faster-whisper>=1.1,<2
+# onnxruntime 1.24+ declares Python 3.10 support but ships no Linux wheels for it.
+onnxruntime<1.24; python_version < "3.11"
+onnxruntime>=1.24; python_version >= "3.11"
+openai>=1.55,<4
+
+# Configuration, glossary and API key storage
+PyYAML>=6.0.1
+python-dotenv>=1.0.1
+rapidfuzz>=3.9
+
+# Not needed at runtime (webrtcvad-wheels 2.0.14 no longer imports pkg_resources). Listed so
+# venvs built with the former `setuptools<81` cap are upgraded past PYSEC-2026-3447.
+setuptools>=83

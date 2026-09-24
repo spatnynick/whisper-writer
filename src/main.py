@@ -2,6 +2,7 @@ import copy
 import os
 import sys
 import logging
+import subprocess
 from datetime import datetime
 from audioplayer import AudioPlayer
 from PyQt5.QtCore import QObject, QProcess, QTimer, Qt, QPoint, pyqtSignal, pyqtSlot
@@ -43,6 +44,8 @@ from config_sync import (
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 UPDATE_SCRIPT = os.path.join(PROJECT_ROOT, 'update.sh')
+# update.sh --check-only exit code when the followed branch was deleted on origin.
+UPDATE_EXIT_BRANCH_GONE = 11
 
 
 class WhisperWriterApp(QObject):
@@ -102,6 +105,7 @@ class WhisperWriterApp(QObject):
         self._sync_timer = QTimer(self)
         self._sync_timer.timeout.connect(self._on_sync_timer)
         self._update_available = False
+        self._branch_gone_notified = False
         self._background_update_check_process = None
         self._update_check_timer = QTimer(self)
         self._update_check_timer.timeout.connect(self._run_background_update_check)
@@ -129,6 +133,7 @@ class WhisperWriterApp(QObject):
         self.settings_window.sync_test_requested.connect(self.test_sync_connection)
         self.settings_window.sync_pull_requested.connect(self.pull_sync_settings)
         self.settings_window.sync_push_requested.connect(self.push_sync_settings)
+        self.settings_window.app_branch_switch_requested.connect(self.switch_app_branch)
         self.settings_window.update_sync_status(self._sync_settings)
         self._configure_sync_timer()
 
@@ -799,12 +804,12 @@ class WhisperWriterApp(QObject):
         else:
             QMessageBox.information(parent, title, message)
 
-    def check_for_updates(self):
-        """Check origin/<current branch> without blocking the GUI."""
+    def _update_blocked(self):
+        """Return True (after telling the user why) when the checkout must not change now."""
         if self._update_process and self._update_process.state() != QProcess.NotRunning:
-            return
+            return True
         if self._shutdown_action:
-            return
+            return True
         if self.result_thread is not None or self.failed_recordings:
             detail = (
                 'Retry the failed transcription or start a new recording before updating.'
@@ -812,6 +817,12 @@ class WhisperWriterApp(QObject):
                 else 'Finish the current recording or transcription before updating.'
             )
             self._show_update_message('Update unavailable', detail, QMessageBox.Warning)
+            return True
+        return False
+
+    def check_for_updates(self):
+        """Check origin/<current branch> without blocking the GUI."""
+        if self._update_blocked():
             return
 
         self.update_action.setEnabled(False)
@@ -869,6 +880,11 @@ class WhisperWriterApp(QObject):
         if exit_code == 10 and 'UPDATE_AVAILABLE' in output:
             self._start_update()
             return
+        if exit_code == UPDATE_EXIT_BRANCH_GONE and 'BRANCH_GONE' in output:
+            self._restore_update_indicator()
+            self._show_update_message('Branch no longer on GitHub', self._branch_gone_message(),
+                                      QMessageBox.Warning)
+            return
 
         logger.warning('Update check exited with code %s: %s', exit_code, output.strip())
         self._restore_update_indicator()
@@ -878,22 +894,46 @@ class WhisperWriterApp(QObject):
             QMessageBox.Warning,
         )
 
-    def _start_update(self):
+    @staticmethod
+    def _current_branch():
+        try:
+            result = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=PROJECT_ROOT,
+                                    capture_output=True, text=True, timeout=3)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    def _branch_gone_message(self):
+        branch = self._current_branch() or 'the current branch'
+        return (
+            f"This installation follows the branch '{branch}', which no longer exists on "
+            'GitHub (it was probably merged and deleted). Open Settings > About and switch '
+            'to main (or another branch) to keep receiving updates.'
+        )
+
+    def switch_app_branch(self, branch):
+        """Switch this installation to origin/<branch> and restart (Settings > About)."""
+        if self._update_blocked():
+            self.settings_window.set_app_branch_status('Branch switch not started.', error=True)
+            return
+        self._start_update(['--switch', branch, '--no-restart'], phase='switching branch')
+
+    def _start_update(self, arguments=None, phase='updating'):
         # Recording or shutdown may have begun while the asynchronous fetch ran.
         if self._shutdown_action or self.result_thread is not None or self.failed_recordings:
             self._restore_update_indicator()
             return
         self._set_update_available(False)
         self.update_action.setEnabled(False)
-        self._set_update_indicator('updating')
+        self._set_update_indicator(phase)
         process = QProcess(self)
         process.setWorkingDirectory(PROJECT_ROOT)
         process.setProcessChannelMode(QProcess.MergedChannels)
         process.finished.connect(self._on_update_finished)
         process.errorOccurred.connect(self._on_update_error)
         self._update_process = process
-        self._update_phase = 'updating'
-        process.start(UPDATE_SCRIPT, ['--no-restart'])
+        self._update_phase = phase
+        process.start(UPDATE_SCRIPT, arguments or ['--no-restart'])
 
     def _on_update_error(self, error):
         if error == QProcess.FailedToStart:
@@ -904,6 +944,7 @@ class WhisperWriterApp(QObject):
         if process is None:
             return
         output = bytes(process.readAllStandardOutput()).decode('utf-8', errors='replace')
+        phase = self._update_phase
         self._clear_update_process()
         if exit_code == 0 and exit_status == QProcess.NormalExit:
             # The updater was launched with --no-restart, so a successful tray update
@@ -912,11 +953,24 @@ class WhisperWriterApp(QObject):
             return
         logger.warning('Updater failed with code %s: %s', exit_code, output.strip())
         self._restore_update_indicator()
-        self._show_update_message(
-            'Update failed',
-            'WhisperWriter could not complete the update. Check the application log and run ./update.sh to retry.',
-            QMessageBox.Warning,
-        )
+        # update.sh prefixes the reason for refusing with "Error:"; show it to the user.
+        reasons = [line[len('Error:'):].strip() for line in output.splitlines() if line.startswith('Error:')]
+        detail = ('\n\n' + '\n'.join(reasons)) if reasons else ''
+        if phase == 'switching branch':
+            self.settings_window.set_app_branch_status(
+                'Switching failed. ' + (reasons[0] if reasons else 'See the application log.'), error=True)
+            self._show_update_message(
+                'Branch switch failed',
+                'WhisperWriter could not switch branches; the installed version is unchanged '
+                'unless the log says otherwise.' + detail,
+                QMessageBox.Warning,
+            )
+        else:
+            self._show_update_message(
+                'Update failed',
+                'WhisperWriter could not complete the update. Check the application log and run ./update.sh to retry.' + detail,
+                QMessageBox.Warning,
+            )
         if self._shutdown_action:
             self._finish_shutdown()
 
@@ -980,6 +1034,12 @@ class WhisperWriterApp(QObject):
             self._set_update_available(False)
         elif exit_code == 10 and 'UPDATE_AVAILABLE' in output:
             self._set_update_available(True)
+        elif exit_code == UPDATE_EXIT_BRANCH_GONE and 'BRANCH_GONE' in output:
+            logger.warning('Background update check: the followed branch no longer exists on origin.')
+            if not getattr(self, '_branch_gone_notified', False) and getattr(self, 'tray_icon', None):
+                self._branch_gone_notified = True
+                self.tray_icon.showMessage('WhisperWriter updates', self._branch_gone_message(),
+                                           QSystemTrayIcon.Warning, 15000)
         else:
             logger.warning('Background update check exited with code %s: %s', exit_code, output.strip())
 
@@ -1368,9 +1428,9 @@ class WhisperWriterApp(QObject):
 
         if ConfigManager.get_config_value('misc', 'play_toggle_sounds'):
             if status == 'recording' and previous_status != 'recording':
-                self.recording_start_sound.play(block=False)
+                self._play_sound(self.recording_start_sound)
             elif previous_status == 'recording' and status != 'recording':
-                self.recording_stop_sound.play(block=False)
+                self._play_sound(self.recording_stop_sound)
 
         if status == 'error':
             self._continue_recording = False
@@ -1475,7 +1535,20 @@ class WhisperWriterApp(QObject):
             self.key_listener.start()
 
         if ConfigManager.get_config_value('misc', 'noise_on_completion'):
-            AudioPlayer(os.path.join('assets', 'beep.wav')).play(block=True)
+            self._play_sound(AudioPlayer(os.path.join('assets', 'beep.wav')), block=True)
+
+    def _play_sound(self, player, block=False):
+        """
+        Play a feedback sound. A sound that cannot play (no audio output, missing
+        GStreamer plugins) is logged once and otherwise ignored: an exception escaping a
+        Qt slot would abort the whole application in the middle of a dictation.
+        """
+        try:
+            player.play(block=block)
+        except Exception as error:
+            if not getattr(self, '_sound_error_logged', False):
+                self._sound_error_logged = True
+                logger.warning('Cannot play feedback sounds (%s); continuing without them.', error)
 
     def run(self):
         """

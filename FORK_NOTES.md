@@ -4,6 +4,31 @@ Personal fork of [savbell/whisper-writer](https://github.com/savbell/whisper-wri
 hotkey-triggered dictation tool. Run on three computers from this same fork; `origin` is
 this fork, `upstream` is the original (unmaintained since Aug 2024) project.
 
+## Dependencies, updates and branch testing (2026-09-24)
+
+- **One lock for Python 3.10–3.14.** `requirements.in` holds the direct dependencies;
+  `tools/lock_requirements.sh` (uv) generates `requirements.txt` with exact pins and
+  per-Python-version markers. Every pinned package has a Linux wheel for every supported
+  version except the locally compiled `pyaudio`, `PyGObject`, `evdev` (ranges, so existing
+  builds are reused) and `webrtcvad-wheels` on 3.14. Verified 2026-09-24 on Ubuntu 24.04:
+  fresh installs on 3.10, 3.11, 3.12, 3.13 and 3.14.7, all tests passing on each, and an upgrade
+  of a venv holding the previous pins with the same `pip install -r requirements.txt` that
+  `update.sh` runs (no compilation, `pip check` clean). A dictation under Xvfb + PulseAudio
+  (pynput hotkey → PyAudio capture → OpenAI client → pynput typing) worked on 3.10, 3.12 and
+  3.14. Real local-model inference was not run (no model download in the test environment);
+  the PyAV decode, Silero VAD/onnxruntime and feature-extraction steps were.
+- **Leftovers.** pip never removes packages that left the requirements; the ~20 unused ones
+  from the old pins stay in existing venvs harmlessly. `./update.sh --rebuild-venv` builds a
+  clean venv (the old one is kept as `venv.previous/` until the new one works).
+- **HTTPS model discovery never worked on Ubuntu 22.04+.** Every PyQt5-Qt5 wheel is built
+  against OpenSSL 1.1: 5.15.2 loads OpenSSL 3 partially and fails the handshake, 5.15.14+
+  refuse to load it. Discovery now uses `urllib` in a thread (`src/model_discovery.py`).
+- **GPU:** ctranslate2 4.8 needs CUDA 12 + cuDNN 9. These machines use the NAS API.
+- **Testing a branch:** Settings → About → Application branch → Switch and restart (or
+  `./update.sh --switch <branch>`). Updates then follow that branch, including force-pushes
+  when the checkout has no commits of its own. When the branch is merged and deleted, the Update
+  action says so; switch back to `main` the same way.
+
 ## Current maintenance notes (2026-09-06)
 
 See [REVIEW.md](REVIEW.md) for fixed critical issues, verification, dependency audit and
@@ -140,6 +165,8 @@ Upstream doesn't work out of the box on a current Ubuntu system. Three real bugs
 - `requirements.txt` — Python-3.12-compatible pins; `sounddevice` → `pyaudio`; added
   `PyGObject` (needed by `audioplayer`'s Linux backend, `import gi`, upstream never pinned
   it) and `setuptools<81` (`webrtcvad-wheels` still imports the now-removed `pkg_resources`).
+  Superseded 2026-09-24 by the `requirements.in` → `requirements.txt` lock for Python
+  3.10–3.14; the setuptools cap is gone (webrtcvad-wheels 2.0.14 no longer needs it).
 - `src/key_listener.py` — the two hotkey fixes above.
 - `src/result_thread.py` — `PyAudio` instead of `sounddevice` for recording.
 - `src/config_schema.yaml` — updated the `sound_device` help text (referenced
@@ -154,12 +181,16 @@ Upstream doesn't work out of the box on a current Ubuntu system. Three real bugs
 
 ```
 build-essential portaudio19-dev libgirepository-2.0-dev libcairo2-dev \
-gobject-introspection pkg-config python3-dev python3-venv
+gobject-introspection pkg-config python3-dev python3-venv \
+gstreamer1.0-plugins-base gstreamer1.0-plugins-good
 ```
+
+(The GStreamer plugins are normally already installed on a desktop; they play the start/stop
+sounds.)
 
 ## Setup on a new machine
 
-No `pyenv` needed — system Python 3.12 works directly now.
+No `pyenv` needed — the system Python works directly (any of 3.10–3.14).
 
 ```
 gh auth login --hostname github.com --git-protocol https --web   # interactive: browser approval
@@ -169,8 +200,8 @@ git clone https://github.com/spatnynick/whisper-writer.git /opt/whisper-writer
 cd /opt/whisper-writer
 git remote add upstream https://github.com/savbell/whisper-writer.git
 python3 -m venv venv
-venv/bin/pip install --upgrade pip
-venv/bin/pip install -r requirements.txt
+venv/bin/python3 -m pip install -r requirements.txt
+venv/bin/python3 -m pip check
 sudo chown bogo:users /opt/whisper-writer   # directory itself; files stay bogo:bogo
 ```
 
@@ -189,7 +220,9 @@ is exactly why `start.sh` calls `venv/bin/python3` directly instead of sourcing 
 
 ## Config (kept identical on all three machines)
 
-`src/config.yaml` is intentionally gitignored (see `.gitignore`) so each machine can diverge,
+The configuration now lives in `~/.config/whisper-writer/config.yaml`, outside the checkout (an
+old `src/config.yaml` is still read until the next save writes the new location), so each machine can diverge and settings synchronization
+can share selected areas,
 but in practice all three should carry this exact content — self-hosted STT on the NAS,
 `Ctrl+Shift+Space` press-to-toggle:
 

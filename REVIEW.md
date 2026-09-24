@@ -18,7 +18,32 @@ branch with regression tests in `tests/test_review_fixes.py` (119 headless tests
 | Medium | Transcripts were printed to stdout (restart.log / session log). | Only length and timing are printed. |
 | Medium | evdev backend: SIGTERM ignored, no devices without `input` group, no hotplug. | Default signal handling; chosen only with readable devices; rescans for new keyboards. |
 
-## Compatibility and dependency plan (not yet applied)
+## Compatibility and dependency plan
+
+**Status 2026-09-24 — steps 1–4 applied** (details in FORK_NOTES.md, "Dependencies, updates
+and branch testing"):
+
+1. Done, differently than first planned: instead of one hashed lock per Python version, a
+   single universal lock (`requirements.txt`, generated from `requirements.in` by
+   `tools/lock_requirements.sh`) with environment markers. The currently deployed `update.sh`
+   therefore installs the right pins without new selection logic. Hashes were left out: the
+   locally compiled packages are deliberately ranges so existing builds are reused, and pip's
+   hash mode requires every line to be pinned and hashed.
+2. Done: all pins have Linux wheels except pyaudio/PyGObject/evdev (and webrtcvad-wheels on
+   3.14). `setuptools<81` was dropped; `setuptools>=83` upgrades old venvs past the advisory.
+   `--only-binary` was not added because it cannot exempt the compiled packages.
+   `PyQt5-Qt5==5.15.19` did not fix HTTPS: no Qt 5 wheel works with OpenSSL 3, so model
+   discovery moved to Python's `urllib` (the finding below was confirmed and is fixed that way).
+3. Done: NumPy 2, ctranslate2 4.8, tokenizers 0.23, pydantic 2.13, openai 3.19. Verified on
+   3.10–3.14 with the test suite and an Xvfb/PulseAudio dictation; local-model inference and GPU
+   (now CUDA 12 + cuDNN 9) remain unverified.
+4. Done: `update.sh` rebuilds a venv whose interpreter no longer runs (`--rebuild-venv` on
+   demand), keeping the previous one until the new one works. It still installs after the
+   fast-forward rather than staging a complete new environment first.
+5. Open: PyQt6 migration and GStreamer-free sound playback.
+
+The original findings and plan follow.
+
 
 Findings from PyPI wheel metadata (2026-09-24), Linux x86_64:
 
