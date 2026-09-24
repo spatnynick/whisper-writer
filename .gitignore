@@ -130,3 +130,6 @@ dmypy.json
 
 # Configuration files
 config.yaml
+
+# Previous venv kept by ./update.sh --rebuild-venv
+venv.previous/

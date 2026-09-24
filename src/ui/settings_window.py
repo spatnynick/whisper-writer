@@ -10,9 +10,8 @@ from PyQt5.QtWidgets import (
     QMessageBox, QShortcut, QTabWidget, QWidget, QSizePolicy, QSpacerItem, QToolButton, QStyle,
     QFileDialog, QTextEdit, QGroupBox, QScrollArea, QFrame
 )
-from PyQt5.QtCore import Qt, QDateTime, QLocale, QTimer, QUrl, pyqtSignal
+from PyQt5.QtCore import Qt, QDateTime, QLocale, QProcess, QProcessEnvironment, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QIcon, QKeySequence, QIntValidator
-from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from ui.base_window import BaseWindow
@@ -20,6 +19,7 @@ from utils import ConfigManager
 from config_validation import validate_config_combination, validate_value
 import api_credentials
 import glossary
+from model_discovery import ModelDiscovery, TIMEOUT_SECONDS as MODEL_DISCOVERY_TIMEOUT_SECONDS
 from config_sync import (
     SYNC_AREA_LABELS,
     SYNC_STATUS_CONNECTION_SUCCESSFUL,
@@ -43,6 +43,8 @@ class SettingsWindow(BaseWindow):
     sync_test_requested = pyqtSignal(object)
     sync_pull_requested = pyqtSignal(object)
     sync_push_requested = pyqtSignal(object)
+    # Branch name; main.py runs `update.sh --switch <branch>` and restarts on success.
+    app_branch_switch_requested = pyqtSignal(str)
 
     def __init__(self):
         """Initialize the settings window."""
@@ -59,8 +61,9 @@ class SettingsWindow(BaseWindow):
         # (no config.yaml yet) a save must still take the restart path, since that's what
         # actually creates them.
         self.allow_live_reload = False
-        self.model_discovery_manager = QNetworkAccessManager(self)
-        self.model_discovery_reply = None
+        self.model_discovery = ModelDiscovery(self)
+        self.model_discovery.finished.connect(self._on_model_discovery_finished)
+        self.model_discovery_pending = False
         self.model_discovery_request_id = 0
         self.model_discovery_key_withheld = False
         self.model_discovery_timeout = QTimer(self)
@@ -642,7 +645,10 @@ class SettingsWindow(BaseWindow):
         commit_hash = self.git_info(['rev-parse', '--short', 'HEAD'])
         commit_date = self.git_info(['log', '-1', '--format=%cd', '--date=format:%Y-%m-%d %H:%M'])
         ahead_count = self.git_info(['rev-list', '--count', 'upstream/main..HEAD'])
+        self.current_app_branch = self.git_info(['rev-parse', '--abbrev-ref', 'HEAD'])
         version_text = f"commit {commit_hash}" if commit_hash else "commit: unknown"
+        if self.current_app_branch and self.current_app_branch != 'HEAD':
+            version_text = f"branch {self.current_app_branch}, " + version_text
         if commit_date:
             version_text += f" ({commit_date})"
         if ahead_count and ahead_count.isdigit():
@@ -669,16 +675,172 @@ class SettingsWindow(BaseWindow):
             upstream_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
             layout.addWidget(upstream_label)
 
+        self._create_app_branch_group(layout)
         layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
+
+    @staticmethod
+    def _repo_root():
+        return os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+
+    def _create_app_branch_group(self, layout):
+        """
+        Let the user run another branch of this fork (e.g. a feature branch under test)
+        without merging it to main first. The switch itself runs in main.py through the
+        same supervised updater as the tray Update action.
+        """
+        group = QGroupBox('Application branch', self)
+        group_layout = QVBoxLayout(group)
+        group_layout.setSpacing(8)
+
+        self.app_branch_combo = QComboBox(group)
+        self.app_branch_combo.setObjectName('app_branch_combo')
+        self.app_branch_combo.setToolTip('Branches of this fork on GitHub (origin)')
+        self.app_branch_combo.currentIndexChanged.connect(self._update_app_branch_buttons)
+        self.app_branch_refresh_button = QPushButton('Refresh list', group)
+        self.app_branch_refresh_button.setObjectName('app_branch_refresh_button')
+        self.app_branch_refresh_button.setToolTip('Ask GitHub for the current list of branches')
+        self.app_branch_refresh_button.clicked.connect(self.refresh_app_branches)
+        self.app_branch_switch_button = QPushButton('Switch and restart', group)
+        self.app_branch_switch_button.setObjectName('app_branch_switch_button')
+        self.app_branch_switch_button.clicked.connect(self._request_app_branch_switch)
+        row = QHBoxLayout()
+        row.addWidget(self.app_branch_combo, 1)
+        row.addWidget(self.app_branch_refresh_button)
+        row.addWidget(self.app_branch_switch_button)
+        group_layout.addWidget(self._sync_labeled_row('Run branch', self._wrap_layout(row)))
+
+        help_label = QLabel(
+            'Installs the selected branch from GitHub together with its dependencies and '
+            'restarts WhisperWriter. The tray Update action then follows that branch. '
+            'Switch back to main when you are done testing. Your settings are kept.', group)
+        help_label.setWordWrap(True)
+        group_layout.addWidget(help_label)
+
+        self.app_branch_status = QLabel('', group)
+        self.app_branch_status.setObjectName('app_branch_status')
+        self.app_branch_status.setWordWrap(True)
+        group_layout.addWidget(self.app_branch_status)
+        layout.addWidget(group)
+
+        self.app_branch_process = None
+        self._populate_app_branches(self._known_app_branches())
+        if not self.current_app_branch:
+            group.setEnabled(False)
+            self.set_app_branch_status('This installation is not a Git checkout.', error=True)
+        elif self.current_app_branch == 'HEAD':
+            self.set_app_branch_status('No branch is checked out (detached HEAD). Select one to follow.')
+
+    @staticmethod
+    def _wrap_layout(inner_layout):
+        widget = QWidget()
+        inner_layout.setContentsMargins(0, 0, 0, 0)
+        widget.setLayout(inner_layout)
+        return widget
+
+    def _known_app_branches(self):
+        """Branches already fetched from origin; no network access."""
+        output = self.git_info(['for-each-ref', '--format=%(refname:strip=3)', 'refs/remotes/origin'])
+        return [name for name in (output or '').splitlines() if name and name != 'HEAD']
+
+    def _populate_app_branches(self, branches):
+        current = getattr(self, 'current_app_branch', None)
+        selected = self.app_branch_combo.currentData() or current
+        names = sorted({name.strip() for name in branches if name.strip()})
+        if current and current != 'HEAD' and current not in names:
+            names.append(current)
+        # main first, then alphabetical
+        names.sort(key=lambda name: (name not in ('main', 'master'), name.lower()))
+        self.app_branch_combo.blockSignals(True)
+        self.app_branch_combo.clear()
+        for name in names:
+            label = f'{name} (installed)' if name == current else name
+            self.app_branch_combo.addItem(label, name)
+        index = self.app_branch_combo.findData(selected)
+        self.app_branch_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.app_branch_combo.blockSignals(False)
+        self._update_app_branch_buttons()
+
+    def _update_app_branch_buttons(self, *_args):
+        branch = self.app_branch_combo.currentData()
+        running = self.app_branch_process is not None
+        self.app_branch_refresh_button.setEnabled(not running)
+        self.app_branch_switch_button.setEnabled(
+            bool(branch) and branch != getattr(self, 'current_app_branch', None) and not running)
+
+    def set_app_branch_status(self, text, error=False):
+        self.app_branch_status.setText(text)
+        self.app_branch_status.setStyleSheet('color: #c0392b;' if error else '')
+
+    def refresh_app_branches(self):
+        """List origin's branches in the background (``update.sh --list-branches``)."""
+        if self.app_branch_process is not None:
+            return
+        process = QProcess(self)
+        process.setWorkingDirectory(self._repo_root())
+        environment = QProcessEnvironment.systemEnvironment()
+        # Never wait for a credential prompt nobody can see.
+        environment.insert('GIT_TERMINAL_PROMPT', '0')
+        process.setProcessEnvironment(environment)
+        process.finished.connect(self._on_app_branches_listed)
+        process.errorOccurred.connect(self._on_app_branch_list_error)
+        self.app_branch_process = process
+        self._update_app_branch_buttons()
+        self.set_app_branch_status('Loading branches from GitHub...')
+        process.start(os.path.join(self._repo_root(), 'update.sh'), ['--list-branches'])
+
+    def _finish_app_branch_process(self):
+        process = self.app_branch_process
+        self.app_branch_process = None
+        if process is not None:
+            process.deleteLater()
+        self._update_app_branch_buttons()
+        return process
+
+    def _on_app_branch_list_error(self, error):
+        if error == QProcess.FailedToStart and self.app_branch_process is not None:
+            self._finish_app_branch_process()
+            self.set_app_branch_status('Could not run update.sh to list branches.', error=True)
+
+    def _on_app_branches_listed(self, exit_code, exit_status):
+        process = self._finish_app_branch_process()
+        if process is None:
+            return
+        output = bytes(process.readAllStandardOutput()).decode('utf-8', errors='replace')
+        branches = [line.strip() for line in output.splitlines() if line.strip()]
+        if exit_code != 0 or exit_status != QProcess.NormalExit or not branches:
+            self.set_app_branch_status(
+                'Could not load branches from GitHub. Check the network connection.', error=True)
+            return
+        self._populate_app_branches(branches)
+        count = len(branches)
+        self.set_app_branch_status(f'{count} branch' + ('' if count == 1 else 'es') + ' on GitHub.')
+
+    def _request_app_branch_switch(self):
+        branch = self.app_branch_combo.currentData()
+        if not branch or branch == getattr(self, 'current_app_branch', None):
+            return
+        unsaved = self.changed_settings() or self.sync_settings_changed()
+        message = (
+            f"Switch WhisperWriter to branch '{branch}' and restart?\n\n"
+            'The branch is downloaded from GitHub and its dependencies are installed, which '
+            'can take a few minutes. Updates then follow this branch until you switch again.'
+        )
+        if unsaved:
+            message += '\n\nUnsaved changes in Settings will be discarded.'
+        reply = QMessageBox.question(self, 'Switch branch?', message,
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        self.set_app_branch_status(f"Switching to '{branch}'...")
+        self.app_branch_switch_requested.emit(branch)
 
     def git_info(self, args):
         """Run a git command against this repo's root and return its stripped stdout, or None
         if git isn't available, this isn't a git checkout, or the command fails (e.g. no
         "upstream" remote configured, or upstream/main isn't fetched locally)."""
-        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
         try:
             result = subprocess.run(
-                ['git'] + args, cwd=repo_root, capture_output=True, text=True, timeout=3
+                ['git'] + args, cwd=self._repo_root(), capture_output=True, text=True, timeout=3
             )
         except (FileNotFoundError, subprocess.SubprocessError):
             return None
@@ -1106,15 +1268,14 @@ class SettingsWindow(BaseWindow):
             status.setStyleSheet('')
 
     def _cancel_model_discovery(self):
+        # A request already sent cannot be interrupted; its late result is ignored because
+        # it carries an outdated request id.
         self.model_discovery_request_id += 1
         self.model_discovery_timeout.stop()
-        reply = self.model_discovery_reply
-        self.model_discovery_reply = None
+        self.model_discovery_pending = False
         refresh_button = getattr(self, 'api_model_refresh_button', None)
         if refresh_button:
             refresh_button.setEnabled(True)
-        if reply:
-            reply.abort()
 
     def refresh_api_models(self):
         """Load models from the configured API endpoint without blocking the settings UI."""
@@ -1130,22 +1291,19 @@ class SettingsWindow(BaseWindow):
 
         self.model_discovery_request_id += 1
         request_id = self.model_discovery_request_id
-        request = QNetworkRequest(url)
-        request.setHeader(QNetworkRequest.UserAgentHeader, 'WhisperWriter')
         api_key = self.api_key_input.text().strip() if self.api_key_input else ''
         self.model_discovery_key_withheld = False
-        if api_key:
-            if self._may_send_form_key(api_key):
-                request.setRawHeader(b'Authorization', f'Bearer {api_key}'.encode('utf-8'))
-            else:
-                self.model_discovery_key_withheld = True
+        if api_key and not self._may_send_form_key(api_key):
+            self.model_discovery_key_withheld = True
+            api_key = ''
 
         self.api_model_refresh_button.setEnabled(False)
         self._set_model_discovery_status('Loading...')
-        reply = self.model_discovery_manager.get(request)
-        self.model_discovery_reply = reply
-        reply.finished.connect(lambda reply=reply, request_id=request_id: self._on_model_discovery_finished(reply, request_id))
-        self.model_discovery_timeout.start(5000)
+        self.model_discovery_pending = True
+        self.model_discovery.start(request_id, url.toString(), api_key or None)
+        # The request itself times out after MODEL_DISCOVERY_TIMEOUT_SECONDS per network
+        # operation; this bounds the total wait shown in the UI.
+        self.model_discovery_timeout.start((MODEL_DISCOVERY_TIMEOUT_SECONDS + 1) * 1000)
 
     def _may_send_form_key(self, api_key):
         """
@@ -1161,36 +1319,34 @@ class SettingsWindow(BaseWindow):
         return api_key != saved_key or api_credentials.may_send_key(base_url)
 
     def _on_model_discovery_timeout(self):
-        reply = self.model_discovery_reply
-        if not reply:
+        if not self.model_discovery_pending:
             return
-        self.model_discovery_reply = None
+        self.model_discovery_pending = False
         self.model_discovery_request_id += 1
-        reply.abort()
         self.api_model_refresh_button.setEnabled(True)
         self._set_model_discovery_status('Request timed out', error=True)
 
-    def _on_model_discovery_finished(self, reply, request_id):
-        reply.deleteLater()
+    def _on_model_discovery_finished(self, request_id, result):
         if request_id != self.model_discovery_request_id:
             return
-        self.model_discovery_reply = None
+        self.model_discovery_pending = False
         self.model_discovery_timeout.stop()
         self.api_model_refresh_button.setEnabled(True)
 
-        status_code = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
-        if reply.error() != QNetworkReply.NoError:
-            self._set_model_discovery_status('Unavailable', error=True)
-            return
+        status_code = result.get('status')
         if status_code is not None and int(status_code) >= 400:
             status = f'HTTP {int(status_code)}'
             if int(status_code) in (401, 403) and getattr(self, 'model_discovery_key_withheld', False):
                 status += ' (API key not sent to this server until saved for it)'
             self._set_model_discovery_status(status, error=True)
             return
+        if result.get('error'):
+            self._set_model_discovery_status('Unavailable', error=True)
+            self.api_model_status.setToolTip(f"Unavailable: {result['error']}")
+            return
 
         try:
-            payload = json.loads(bytes(reply.readAll()).decode('utf-8'))
+            payload = json.loads(result.get('body', b'').decode('utf-8'))
         except (UnicodeDecodeError, json.JSONDecodeError):
             self._set_model_discovery_status('Invalid response', error=True)
             return
