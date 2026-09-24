@@ -120,7 +120,16 @@ user configuration directory (`~/.config/whisper-writer/sync/repository` on Linu
 `%APPDATA%\\WhisperWriter\\sync\\repository` on Windows) and writes only the selected areas to
 `whisperwriter-sync.yaml`. Prompt context, provider settings, hotkeys, recording, audio, local
 model, text output and interface settings can each be enabled or disabled independently. API keys
-and other secrets are never synchronized.
+and other secrets are never synchronized, and neither are machine-specific values: the microphone
+index (`sound_device`) and the local model's `device`/`compute_type` stay on each computer.
+
+Each synchronization merges setting by setting: a value changed on only one computer keeps that
+change, so two computers editing different settings do not revert each other. When the same
+setting was changed differently on two computers, the remote value is kept and the Synchronization
+tab and a tray message name the setting. Remote values are validated before they are applied;
+invalid ones are ignored and reported. A synchronized change of the API server URL is applied only
+after you confirm it; declining keeps this computer's server and stops synchronizing provider
+settings on this computer.
 
 Enter the remote repository URL and use **Test connection and refresh branches** in the Git
 authentication section to discover and select a branch. A new setup does not preselect a branch:
@@ -137,6 +146,9 @@ completed. A new client always pulls a non-empty remote repository first; only a
 be bootstrapped by a push. A manual Pull saves the local synchronization preferences first and
 never pushes as part of that save. Synchronization is paused during recording and transcription.
 Pull applies the selected remote areas and restarts WhisperWriter only after the operation succeeds.
+Saving settings that need a restart always restarts, even when the automatic push fails (for
+example while offline); the failure stays visible in the Synchronization tab and the next
+synchronization publishes the saved values.
 Errors are shown in the Synchronization tab and marked on the idle tray icon; no synchronization
 error popup or desktop notification is displayed.
 
@@ -154,6 +166,12 @@ The tray's Update action checks the current branch on `origin`. Finish dictation
   - `model`: The primary transcription model used by a short activation. Model ids ending in `.en` are English-only, so choose the model that fits your recordings. A held activation switches to the configured secondary model; WhisperWriter never substitutes a model based on detected language. (Default: `whisper-1`)
   - `secondary_model`: Optional secondary model. After the first press, a short activation stops and transcribes; a held activation alternates primary and secondary without stopping capture. The active model is shown in the tray tooltip and status popup. (Default: `null`)
   - `api_key`: Your API key for the OpenAI API. Required for non-local API usage. (Default: `null`)
+    The key is stored in the per-user `.env` file together with the server it was saved for
+    (`WHISPER_WRITER_API_KEY_HOST`). It is sent only to that server, only over HTTPS (plain HTTP
+    only to this computer, e.g. `http://localhost`), and never to a server URL that arrived by
+    synchronization until you save the key for it in Settings. Other servers receive a
+    placeholder key, which keyless local servers accept. Existing installations bind the key to
+    the currently configured server on first start.
 
 - `local`: Configuration options for the local Whisper model.
   - `model`: The model to use for transcription. The larger models provide better accuracy but are slower. See [available models and languages](https://github.com/openai/whisper?tab=readme-ov-file#available-models-and-languages). (Default: `base`)

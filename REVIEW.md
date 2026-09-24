@@ -1,3 +1,66 @@
+# Review follow-up — 2026-09-24
+
+A read-only review found five high and seven medium issues; all twelve are fixed on this
+branch with regression tests in `tests/test_review_fixes.py` (119 headless tests pass).
+
+| Severity | Issue | Fix |
+|---|---|---|
+| High | Glossary phrases matched inside/across words: "This is a problem." became "This iSAProblem." | Whole-word matching; replacement text is literal. |
+| High | A synchronized `base_url` received `OPENAI_API_KEY` (also over plain HTTP) and all audio. | Key bound to the host it was saved for (`WHISPER_WRITER_API_KEY_HOST` in the user `.env`), sent only over HTTPS or to localhost; model discovery follows the same rule. A remote server-URL change needs confirmation; declining stops provider sync locally. Existing installs bind to their current server on first start. |
+| High | Pulled values were written unvalidated; e.g. `activation_key: 123` crashed every computer at startup. | `config_validation.py`: schema types, options, ranges, hotkey names, URLs and sample-rate/mode combinations. Used for pulled values (rejected and reported), config.yaml loading (invalid values fall back to defaults) and Settings save. |
+| High | Sync overwrote whole areas, silently reverting another computer's changes. | Per-setting three-way merge (last synced state / this computer / remote). Conflicts keep the remote value and are reported in the Synchronization tab and a tray message. An unpushed commit after the remote moved is rebuilt on the remote instead of failing permanently. |
+| High | Machine-specific values synced by default. | `sound_device` and local `device`/`compute_type` removed from synchronization. |
+| Medium | Push-on-save failure (offline) skipped the restart, leaving saved settings unapplied. | Save-triggered restarts happen regardless; the error stays visible and the next sync publishes. |
+| Medium | A pull replaced the whole config with the worker's snapshot, losing edits made meanwhile. | Results carry per-setting updates with their previous value; edits made during the sync win. |
+| Medium | Empty timeout meant "no timeout"; empty/negative key delay aborted typing. | Validation plus runtime defaults (120 s, 5 ms). |
+| Medium | Unknown hotkey names were dropped (typo → fires on every Ctrl+Shift; empty → every key release). | Strict parser; invalid shortcut falls back to `ctrl+shift+space` with a warning. |
+| Medium | Suspend discarded the recording and any finishing transcription. | Recording is cancelled with audio kept for Retry (even after an overrun); a transcription finishing across suspend is kept for Copy Last Transcript and not typed after resume. |
+| Medium | Transcripts were printed to stdout (restart.log / session log). | Only length and timing are printed. |
+| Medium | evdev backend: SIGTERM ignored, no devices without `input` group, no hotplug. | Default signal handling; chosen only with readable devices; rescans for new keyboards. |
+
+## Compatibility and dependency plan (not yet applied)
+
+Findings from PyPI wheel metadata (2026-09-24), Linux x86_64:
+
+- `av==11.0.0` has **no Linux wheels**; every install compiles it (needs FFmpeg dev packages
+  not listed in FORK_NOTES). `av>=12` ships wheels (12.3: cp38–cp312; 18.x: abi3, Python ≥3.11).
+- No cp312 wheels for `regex==2023.5.5`, `tiktoken==0.3.1` (sdist needs a Rust toolchain) or
+  `webrtcvad-wheels==2.0.11.post1` (2.0.14 has cp310–cp313 wheels).
+- No cp313+ wheels for `numpy<2` (1.26.x), `tokenizers==0.15.0`, `ctranslate2==4.2.1`,
+  `pydantic_core==2.18.2`. A distro upgrade to a Python ≥3.13 release breaks both the existing
+  venv (its interpreter disappears) and a reinstall.
+- About 20 pins are not imported by the code or required by a used package: the PyAutoGUI
+  family (MouseInfo, PyGetWindow, PyMsgBox, PyRect, PyScreeze, pyscreenshot, mss,
+  EasyProcess, entrypoint2, pytweening, pyperclip), `tiktoken`, `regex`, `ffmpeg-python`,
+  `future`, `colorama`, `pyreadline3`, `Jinja2`/`MarkupSafe`, `attrs`, `more-itertools`,
+  `Pillow`, and `sympy`/`mpmath`/`coloredlogs`/`humanfriendly` (no longer needed by current
+  onnxruntime). Each is extra attack surface and build risk.
+- `anyio==4.3.0` has two advisories fixed in 4.14.2 (CVE-2026-63374, CVE-2026-64847; low
+  relevance here). `PyGObject` and `onnxruntime` are unpinned. PyQt5/Qt 5.15 is end of life;
+  `PyQt5-Qt5==5.15.2` predates OpenSSL 3 support, so HTTPS model discovery may fail on
+  Ubuntu 22.04+ (verify; 5.15.19 exists).
+
+Proposed order, each step verified on one machine before the others:
+
+1. **Trim** `requirements.txt` to direct dependencies (PyQt5, python-xlib, audioplayer,
+   PyGObject, python-dotenv, faster-whisper, numpy, openai, httpx, pyaudio, pynput, rapidfuzz,
+   soundfile, webrtcvad-wheels, PyYAML) and generate a full lock with `pip-compile
+   --generate-hashes` per Python version (`requirements-py312.txt`, later `-py313`); install
+   with `--require-hashes`. `update.sh` selects the lock matching `venv/bin/python3`.
+2. **Wheel-only upgrades** within the current Python: `av>=12`, `webrtcvad-wheels==2.0.14`
+   (then retest whether `pkg_resources`/`setuptools<81` is still needed), `anyio>=4.14.2`,
+   pin `PyGObject` and `onnxruntime`, try `PyQt5-Qt5==5.15.19`. Add `pip install
+   --only-binary=:all:` (except pyaudio/PyGObject) so a missing wheel fails loudly instead of
+   compiling.
+3. **Python 3.13/3.14 readiness:** `numpy>=2` with `ctranslate2>=4.5`, `tokenizers>=0.20`,
+   current `pydantic`/`openai`; run the suite plus a real microphone/API/local-model smoke
+   test. Update README (still says Python 3.11) to the supported range.
+4. **Venv resilience:** `update.sh` detects a venv whose interpreter is missing or whose
+   version differs from the lock, and rebuilds it into `venv.new` before swapping (also the
+   staged-install/rollback topic under "Remaining topics" below).
+5. **Longer term:** PyQt6 migration (Qt 5 is EOL), and GStreamer-free sound playback to drop
+   the PyGObject build dependency.
+
 # Critical-path review — 2026-09-06
 
 Reviewed the application lifecycle, recording/transcription, hotkeys, text injection,

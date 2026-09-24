@@ -141,7 +141,9 @@ class ResultThread(QThread):
             end_time = time.time()
 
             transcription_time = end_time - start_time
-            ConfigManager.console_print(f'Transcription completed in {transcription_time:.2f} seconds. Post-processed line: {result}')
+            # The transcript itself is not printed: stdout ends up in restart.log or the
+            # desktop session log, which must not accumulate dictated text.
+            ConfigManager.console_print(f'Transcription completed in {transcription_time:.2f} seconds ({len(result)} characters).')
             logger.debug(f'Transcription completed in {transcription_time:.2f}s. Result length: {len(result)} chars')
 
             if not self.is_running:
@@ -255,8 +257,10 @@ class ResultThread(QThread):
         finally:
             audio.terminate()
 
-        if overflow.is_set():
+        if overflow.is_set() and not self.is_cancelled:
             raise RuntimeError('Audio capture overflowed; recording is incomplete. Please retry.')
+        # A cancelled recording (Escape, or a suspend that interrupted capture) is kept for
+        # Retry even if the device reported an overrun, e.g. while the computer slept.
         audio_data = np.frombuffer(recording, dtype=np.int16)
         duration = len(audio_data) / self.sample_rate
 
@@ -266,7 +270,7 @@ class ResultThread(QThread):
         min_duration_ms = recording_options.get('min_duration') or 100
 
         if (duration * 1000) < min_duration_ms:
-            ConfigManager.console_print(f'Discarded due to being too short.')
+            ConfigManager.console_print('Discarded due to being too short.')
             logger.debug(f'Recording discarded: duration {duration*1000:.0f}ms < min_duration {min_duration_ms}ms')
             return None
 

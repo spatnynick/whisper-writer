@@ -3,7 +3,13 @@
 The application keeps its normal runtime configuration in one YAML file.  This module
 projects selected settings into a separate, Git-managed YAML file and can apply those
 selected settings back without exposing machine-local values such as API keys, device
-indexes, or model paths.
+indexes, GPU/compute choices, or model paths.
+
+Each operation is a per-setting three-way merge between the last synchronized state of
+this computer (the managed clone before fetching), this computer's settings and the
+remote file: a setting changed on only one side keeps that change, so two computers that
+edit different settings never revert each other. Remote values are validated against the
+schema before they are applied.
 """
 
 import copy
@@ -18,6 +24,7 @@ from pathlib import Path
 import yaml
 from PyQt5.QtCore import QThread, pyqtSignal
 
+from config_validation import validate_value
 from utils import ConfigManager
 
 
@@ -52,9 +59,9 @@ SYNC_AREA_LABELS = {
     'interface': 'Interface and general settings',
 }
 
-# These paths intentionally contain no API key or machine-specific model path.  The
-# program can therefore synchronize a whole area without accidentally moving secrets or
-# paths between Linux and Windows installations.
+# These paths intentionally contain no API key, microphone index, GPU/compute selection or
+# machine-specific model path. The program can therefore synchronize a whole area without
+# moving secrets or hardware-specific values between different computers.
 SYNC_AREA_PATHS = {
     'prompt_context': (
         ('model_options', 'common', 'initial_prompt'),
@@ -78,13 +85,12 @@ SYNC_AREA_PATHS = {
         ('recording_options', 'min_duration'),
     ),
     'audio': (
-        ('recording_options', 'sound_device'),
+        # The microphone index (sound_device) is local: PyAudio numbers devices per computer.
         ('recording_options', 'sample_rate'),
     ),
     'local_model': (
+        # device/compute_type depend on this computer's GPU and are not synchronized.
         ('model_options', 'local', 'model'),
-        ('model_options', 'local', 'device'),
-        ('model_options', 'local', 'compute_type'),
         ('model_options', 'local', 'condition_on_previous_text'),
         ('model_options', 'local', 'vad_filter'),
     ),
@@ -106,6 +112,12 @@ SYNC_AREA_PATHS = {
         ('misc', 'update_check_interval_hours'),
     ),
 }
+
+_PATH_AREAS = {path: area for area, paths in SYNC_AREA_PATHS.items() for path in paths}
+
+# Synchronized paths that change where recordings are sent. main.py asks before applying a
+# remote change to them; the API key itself is never synchronized.
+ENDPOINT_PATHS = (('model_options', 'api', 'base_url'),)
 
 _MISSING = object()
 
@@ -140,6 +152,9 @@ def default_sync_settings():
         },
         'status': SYNC_STATUS_NOT_CONFIGURED,
         'last_error': '',
+        # Non-fatal outcome of the last operation, e.g. remote values that were rejected
+        # by validation or settings changed differently on two computers.
+        'last_notice': '',
         'last_success': '',
         'last_checked': '',
         'last_remote_commit': '',
@@ -156,7 +171,7 @@ def normalize_sync_settings(raw):
         if isinstance(raw.get(key), bool):
             settings[key] = raw[key]
     for key in ('repository_url', 'branch', 'git_path', 'status', 'last_error',
-                'last_success', 'last_checked', 'last_remote_commit'):
+                'last_notice', 'last_success', 'last_checked', 'last_remote_commit'):
         if isinstance(raw.get(key), str):
             settings[key] = raw[key]
     try:
@@ -288,44 +303,128 @@ def selected_areas(settings):
     return [area for area in SYNC_AREA_PATHS if areas.get(area) is True]
 
 
-def export_selected_areas(config, settings):
-    """Project the selected values from the full runtime config into a sync payload."""
-    exported = {}
-    for area in selected_areas(settings):
-        area_config = {}
-        for path in SYNC_AREA_PATHS[area]:
-            _set_nested(area_config, path, _get_nested(config, path))
-        exported[area] = area_config
-    return {'version': SYNC_VERSION, 'areas': exported}
+def _schema():
+    """Return the running application's schema, loading it when running standalone."""
+    instance = getattr(ConfigManager, '_instance', None)
+    if instance is not None and getattr(instance, 'schema', None):
+        return instance.schema
+    return ConfigManager.load_config_schema()
 
 
-def apply_selected_areas(config, payload, settings):
-    """Apply only selected known paths from a sync payload to a config copy."""
-    result = copy.deepcopy(config)
-    if not isinstance(payload, dict) or not isinstance(payload.get('areas'), dict):
-        return result
-    remote_areas = payload['areas']
-    for area in selected_areas(settings):
-        area_config = remote_areas.get(area)
-        if not isinstance(area_config, dict):
-            continue
-        for path in SYNC_AREA_PATHS[area]:
+def _selected_paths(settings):
+    return [path for area in selected_areas(settings) for path in SYNC_AREA_PATHS[area]]
+
+
+def _config_values(config, settings, schema):
+    """Return this computer's valid values for the selected paths."""
+    values = {}
+    for path in _selected_paths(settings):
+        value = _get_nested(config, path, default=_MISSING)
+        # An invalid local value is never published; it counts as "no local change".
+        if value is not _MISSING and validate_value(schema, path, value) is None:
+            values[path] = value
+    return values
+
+
+def _payload_values(payload, settings):
+    """Return the raw selected values stored in a synchronization payload."""
+    values = {}
+    areas = payload.get('areas') if isinstance(payload, dict) else None
+    if not isinstance(areas, dict):
+        return values
+    for path in _selected_paths(settings):
+        area_config = areas.get(_PATH_AREAS[path])
+        if isinstance(area_config, dict):
             value = _get_nested(area_config, path, default=_MISSING)
             if value is not _MISSING:
-                # ``None`` is a valid synchronized value (for example an unset language),
-                # so a distinct sentinel is needed for missing paths.
-                _set_nested(result, path, value)
-    return result
+                values[path] = value
+    return values
 
 
-def _payload_with_updates(existing, updates):
+def _payload_with_values(existing, values):
+    """Return ``existing`` with the given path values written into their areas."""
     payload = copy.deepcopy(existing) if isinstance(existing, dict) else {}
     payload['version'] = SYNC_VERSION
     if not isinstance(payload.get('areas'), dict):
         payload['areas'] = {}
-    for area, values in updates.items():
-        payload['areas'][area] = copy.deepcopy(values)
+    for path, value in values.items():
+        area = _PATH_AREAS[path]
+        if not isinstance(payload['areas'].get(area), dict):
+            payload['areas'][area] = {}
+        _set_nested(payload['areas'][area], path, value)
     return payload
+
+
+def _dotted(path):
+    return '.'.join(path)
+
+
+def export_selected_areas(config, settings):
+    """Project the selected, valid values from the runtime config into a sync payload."""
+    values = _config_values(config, settings, _schema())
+    payload = _payload_with_values({}, values)
+    for area in selected_areas(settings):
+        payload['areas'].setdefault(area, {})
+    return payload
+
+
+def remote_updates(config, payload, settings, schema=None):
+    """
+    Return ``(updates, rejected)`` for applying a payload's selected values to ``config``.
+
+    ``updates`` is a list of ``(path, previous, value)`` for valid values that differ from
+    the config. ``rejected`` lists ``(dotted path, reason)`` for remote values that fail
+    schema validation; those are never applied.
+    """
+    schema = schema or _schema()
+    updates, rejected = [], []
+    for path, value in _payload_values(payload, settings).items():
+        reason = validate_value(schema, path, value)
+        if reason:
+            rejected.append((_dotted(path), reason))
+            continue
+        previous = _get_nested(config, path, default=None)
+        if previous != value:
+            updates.append((path, previous, value))
+    return updates, rejected
+
+
+def apply_updates(config, updates):
+    """Return a config copy with ``(path, previous, value)`` updates applied."""
+    result = copy.deepcopy(config)
+    for path, _previous, value in updates:
+        _set_nested(result, path, value)
+    return result
+
+
+def apply_selected_areas(config, payload, settings):
+    """Apply only selected, valid, known paths from a sync payload to a config copy."""
+    updates, _rejected = remote_updates(config, payload, settings)
+    return apply_updates(config, updates)
+
+
+def merge_values(base, mine, theirs, schema):
+    """
+    Three-way merge of selected path values.
+
+    ``base`` is what this computer last synchronized, ``mine`` its current settings and
+    ``theirs`` the remote file. A path changed on only one side takes that side; a path
+    changed differently on both sides keeps the remote value (it was published first) and
+    is reported as a conflict. Returns ``(merged, conflicts)``.
+    """
+    merged = dict(theirs)
+    conflicts = []
+    for path in set(base) | set(mine) | set(theirs):
+        b = base.get(path, _MISSING)
+        m = mine.get(path, _MISSING)
+        t = theirs.get(path, _MISSING)
+        if m is _MISSING or m == b:
+            continue  # no local change: the remote value stands
+        if t == b or t is _MISSING or validate_value(schema, path, t) is not None:
+            merged[path] = m  # only this computer changed it (or the remote value is unusable)
+        elif m != t:
+            conflicts.append(_dotted(path))
+    return merged, conflicts
 
 
 def _read_sync_payload(path):
@@ -603,174 +702,147 @@ class ConfigSyncManager:
         result = self._run_git(['rev-parse', 'HEAD'], cwd=path, check=False)
         return result.stdout.strip() if result.returncode == 0 else ''
 
-    def _commit_and_push(self, path, branch, message):
-        self._run_git(['add', '--', SYNC_FILE_NAME], cwd=path)
-        self._run_git([
-            '-c', 'user.name=WhisperWriter',
-            '-c', 'user.email=whisper-writer@localhost',
-            'commit', '-m', message,
-        ], cwd=path)
-        self._run_git(['push', 'origin', branch], cwd=path, timeout=180)
+    def _remote_is_populated(self, info):
+        return bool(info['branches'] or info['head_commit'])
 
-    def push(self, config):
-        areas = selected_areas(self.settings)
-        if not areas:
-            return {'action': 'push', 'changed': False, 'remote_commit': ''}
-        info = self._remote_info()
-        if (info['branches'] or info['head_commit']) and not self.settings.get(
-            'initial_sync_completed', False
-        ):
-            raise SyncError(
-                'This client has not completed its first synchronization. '
-                'Pull the remote settings before pushing.'
-            )
+    def _open_branch(self, info=None):
+        info = info or self._remote_info()
         branch = self._selected_branch(info)
         path = self._ensure_repository(branch, empty_remote=info.get('empty', False))
-        local_commit_before = self._local_commit(path)
-        sync_path = path / SYNC_FILE_NAME
-        local_existing = _read_sync_payload(str(sync_path))
-        update = export_selected_areas(config, self.settings)['areas']
-        local_payload_changed = _payload_with_updates(local_existing, update) != local_existing
-        self._prepare_repository(path, branch, info['head_commit'], 'push')
+        return info, branch, path
 
-        existing = _read_sync_payload(str(sync_path))
-        if local_payload_changed:
-            candidate = _payload_with_updates(existing, update)
-            _write_sync_payload(str(sync_path), candidate)
-            self._commit_and_push(path, branch, 'Update WhisperWriter synchronized settings')
-        else:
-            # A previous push may have committed successfully but lost network access before
-            # the remote accepted it.  Push an existing local commit, without rewriting files.
-            local_commit = self._local_commit(path)
-            if local_commit != info['head_commit']:
-                self._run_git(['push', 'origin', branch], cwd=path, timeout=180)
-                candidate = existing
-            elif local_commit_before != info['head_commit']:
-                raise SyncError('Remote synchronized settings changed; pull before pushing.')
-            else:
-                candidate = existing
-
-        remote_commit = self._remote_info()['head_commit']
+    def _result(self, action, config, branch, remote_commit, updates=(), rejected=(),
+                conflicts=(), pushed=False):
+        updates = list(updates)
         return {
-            'action': 'push',
-            'changed': local_payload_changed,
+            'action': action,
+            'changed': bool(updates) or pushed,
+            'pushed': pushed,
+            # (path, previous, value) triples; main.py applies them to its *current*
+            # configuration so edits made while Git was running are not overwritten.
+            'updates': [(list(path), previous, value) for path, previous, value in updates],
+            'config': apply_updates(config, updates),
+            'rejected': list(rejected),
+            'conflicts': list(conflicts),
             'branch': branch,
             'remote_commit': remote_commit,
             'initial_sync_completed': True,
         }
 
-    def pull(self, config):
-        areas = selected_areas(self.settings)
-        if not areas:
-            return {'action': 'pull', 'changed': False, 'config': copy.deepcopy(config), 'remote_commit': ''}
-        info = self._remote_info()
-        branch = self._selected_branch(info)
-        path = self._ensure_repository(branch, empty_remote=info.get('empty', False))
-        self._prepare_repository(path, branch, info['head_commit'], 'pull')
+    def _take_remote(self, action, config, path, branch, remote_commit):
         payload = _read_sync_payload(str(path / SYNC_FILE_NAME))
-        updated_config = apply_selected_areas(config, payload, self.settings)
-        return {
-            'action': 'pull',
-            'changed': updated_config != config,
-            'config': updated_config,
-            'branch': branch,
-            'remote_commit': info['head_commit'],
-            'initial_sync_completed': True,
-        }
+        updates, rejected = remote_updates(config, payload, self.settings)
+        return self._result(action, config, branch, remote_commit, updates, rejected)
+
+    def _payload_at(self, path, commit):
+        shown = self._run_git(['show', f'{commit}:{SYNC_FILE_NAME}'], cwd=path, check=False)
+        if shown.returncode != 0:
+            return {'version': SYNC_VERSION, 'areas': {}}
+        try:
+            payload = yaml.safe_load(shown.stdout)
+        except yaml.YAMLError:
+            return {'version': SYNC_VERSION, 'areas': {}}
+        return payload if isinstance(payload, dict) else {'version': SYNC_VERSION, 'areas': {}}
+
+    def _recover_divergence(self, path, branch, remote_commit, base_payload):
+        """
+        Rebuild on the remote branch when a local commit was never pushed and the remote
+        moved meanwhile (typically an offline computer). The unpushed values are still in
+        this computer's settings, so the merge recreates them on top of the remote; the
+        common ancestor becomes the merge base. Returns the base payload to merge from.
+        """
+        local_commit = self._local_commit(path)
+        if not remote_commit or not local_commit or local_commit == remote_commit:
+            return base_payload
+        status = self._run_git(['status', '--porcelain', '--untracked-files=all'], cwd=path).stdout.strip()
+        if status:
+            return base_payload  # _prepare_repository reports the uncommitted changes
+        self._run_git(['fetch', '--quiet', 'origin', branch], cwd=path)
+        counts = self._run_git(
+            ['rev-list', '--left-right', '--count', f'HEAD...origin/{branch}'], cwd=path
+        ).stdout.split()
+        try:
+            ahead, behind = int(counts[0]), int(counts[1])
+        except (IndexError, ValueError):
+            return base_payload
+        if not (ahead and behind):
+            return base_payload
+        ancestor = self._run_git(['merge-base', 'HEAD', f'origin/{branch}'], cwd=path, check=False)
+        ancestor_commit = ancestor.stdout.strip() if ancestor.returncode == 0 else ''
+        merge_base = self._payload_at(path, ancestor_commit) if ancestor_commit else {
+            'version': SYNC_VERSION, 'areas': {}}
+        self._run_git(['reset', '--hard', f'origin/{branch}'], cwd=path)
+        return merge_base
+
+    def _synchronize(self, action, config, info, branch, path):
+        """Merge this computer's settings with the remote file, push, and report updates."""
+        schema = _schema()
+        sync_path = path / SYNC_FILE_NAME
+        # The managed clone's file before fetching is the last state this computer
+        # synchronized: the common ancestor for the three-way merge.
+        base_payload = _read_sync_payload(str(sync_path))
+        base_payload = self._recover_divergence(path, branch, info['head_commit'], base_payload)
+        self._prepare_repository(path, branch, info['head_commit'], 'auto')
+        theirs_payload = _read_sync_payload(str(sync_path))
+
+        base = _payload_values(base_payload, self.settings)
+        theirs = _payload_values(theirs_payload, self.settings)
+        mine = _config_values(config, self.settings, schema)
+        merged, conflicts = merge_values(base, mine, theirs, schema)
+
+        candidate = _payload_with_values(theirs_payload, merged)
+        if candidate != theirs_payload:
+            _write_sync_payload(str(sync_path), candidate)
+            self._run_git(['add', '--', SYNC_FILE_NAME], cwd=path)
+            self._run_git([
+                '-c', 'user.name=WhisperWriter',
+                '-c', 'user.email=whisper-writer@localhost',
+                'commit', '-m', 'Update WhisperWriter synchronized settings',
+            ], cwd=path)
+
+        # Also retries a commit whose earlier push failed after committing locally.
+        local_commit = self._local_commit(path)
+        pushed = bool(local_commit) and local_commit != info['head_commit']
+        if pushed:
+            self._run_git(['push', 'origin', branch], cwd=path, timeout=180)
+        remote_commit = self._remote_info()['head_commit'] if pushed else info['head_commit']
+
+        updates, rejected = remote_updates(config, candidate, self.settings, schema)
+        return self._result(action, config, branch, remote_commit, updates, rejected,
+                            conflicts, pushed)
+
+    def push(self, config):
+        if not selected_areas(self.settings):
+            return {'action': 'push', 'changed': False, 'updates': [], 'remote_commit': ''}
+        info = self._remote_info()
+        if self._remote_is_populated(info) and not self.settings.get('initial_sync_completed', False):
+            raise SyncError(
+                'This client has not completed its first synchronization. '
+                'Pull the remote settings before pushing.'
+            )
+        info, branch, path = self._open_branch(info)
+        return self._synchronize('push', config, info, branch, path)
+
+    def pull(self, config):
+        if not selected_areas(self.settings):
+            return {'action': 'pull', 'changed': False, 'updates': [],
+                    'config': copy.deepcopy(config), 'remote_commit': ''}
+        info, branch, path = self._open_branch()
+        self._prepare_repository(path, branch, info['head_commit'], 'pull')
+        return self._take_remote('pull', config, path, branch, info['head_commit'])
 
     def auto_sync(self, config, last_remote_commit=''):
-        """Push local selected changes or apply remote changes during an interval tick."""
-        areas = selected_areas(self.settings)
-        if not areas:
-            return {'action': 'auto', 'changed': False, 'remote_commit': ''}
-
-        info = self._remote_info()
-        branch = self._selected_branch(info)
-        path = self._ensure_repository(branch, empty_remote=info.get('empty', False))
-        local_commit_before = self._local_commit(path)
-        sync_path = path / SYNC_FILE_NAME
-        local_existing = _read_sync_payload(str(sync_path))
-        current_payload = export_selected_areas(config, self.settings)['areas']
-        # Compare the application against the last local sync snapshot before fetching.  Once
-        # the remote branch is fast-forwarded, that file may contain another computer's
-        # values, which must be treated as a remote change rather than a local edit.
-        local_payload_changed = _payload_with_updates(local_existing, current_payload) != local_existing
-        first_remote_attach = not self.settings.get('initial_sync_completed', False) and bool(
-            info['branches'] or info['head_commit']
-        )
-        self._prepare_repository(
-            path,
-            branch,
-            info['head_commit'],
-            'pull' if first_remote_attach else 'auto',
-        )
-
-        existing = _read_sync_payload(str(sync_path))
-
-        # Attaching a new client to a non-empty remote is always a pull, even when the
-        # user enabled "push on save" or an interval check is the first operation.  The
-        # remote configuration is the source of truth until the initial pull completes.
-        if not self.settings.get('initial_sync_completed', False) and (
-            info['branches'] or info['head_commit']
-        ):
-            payload = _read_sync_payload(str(sync_path))
-            updated_config = apply_selected_areas(config, payload, self.settings)
-            return {
-                'action': 'pull',
-                'changed': updated_config != config,
-                'config': updated_config,
-                'branch': branch,
-                'remote_commit': info['head_commit'],
-                'initial_sync_completed': True,
-            }
-
-        # A previous commit may have succeeded locally but failed while pushing.  The
-        # interval should retry that push rather than treating the local commit as a remote
-        # pull, and it must not create a second empty commit.
-        local_commit_after = self._local_commit(path)
-        if (
-            not local_payload_changed
-            and local_commit_before != info['head_commit']
-            and local_commit_after != info['head_commit']
-        ):
-            self._run_git(['push', 'origin', branch], cwd=path, timeout=180)
-            return {
-                'action': 'push',
-                'changed': False,
-                'branch': branch,
-                'remote_commit': self._remote_info()['head_commit'],
-                'initial_sync_completed': True,
-            }
-
-        if local_payload_changed:
-            candidate = _payload_with_updates(existing, current_payload)
-            _write_sync_payload(str(sync_path), candidate)
-            self._commit_and_push(path, branch, 'Update WhisperWriter synchronized settings')
-            return {
-                'action': 'push',
-                'changed': True,
-                'branch': branch,
-                'remote_commit': self._remote_info()['head_commit'],
-                'initial_sync_completed': True,
-            }
-
-        # The managed clone is updated by _prepare_repository, so its pre-fetch HEAD is the
-        # durable local snapshot. Relying on the status file here would repeat a no-op pull
-        # forever when a remote commit changed only an area disabled on this machine.
-        remote_changed = local_commit_before != info['head_commit']
-        if not remote_changed:
-            return {'action': 'auto', 'changed': False, 'remote_commit': info['head_commit']}
-
-        payload = _read_sync_payload(str(sync_path))
-        updated_config = apply_selected_areas(config, payload, self.settings)
-        return {
-            'action': 'pull',
-            'changed': updated_config != config,
-            'config': updated_config,
-            'branch': branch,
-            'remote_commit': info['head_commit'],
-            'initial_sync_completed': True,
-        }
+        """Push local selected changes and/or apply remote changes during an interval tick."""
+        if not selected_areas(self.settings):
+            return {'action': 'auto', 'changed': False, 'updates': [], 'remote_commit': ''}
+        info, branch, path = self._open_branch()
+        if self._remote_is_populated(info) and not self.settings.get('initial_sync_completed', False):
+            # Attaching a new client to a non-empty remote is always a pull, even when the
+            # user enabled "push on save" or an interval check is the first operation. The
+            # remote configuration is the source of truth until the initial pull completes.
+            self._prepare_repository(path, branch, info['head_commit'], 'pull')
+            return self._take_remote('pull', config, path, branch, info['head_commit'])
+        return self._synchronize('auto', config, info, branch, path)
 
 
 class SyncWorker(QThread):

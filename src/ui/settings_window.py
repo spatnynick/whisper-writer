@@ -1,3 +1,4 @@
+import copy
 import os
 import json
 import math
@@ -16,6 +17,8 @@ from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkReques
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from ui.base_window import BaseWindow
 from utils import ConfigManager
+from config_validation import validate_config_combination, validate_value
+import api_credentials
 import glossary
 from config_sync import (
     SYNC_AREA_LABELS,
@@ -59,6 +62,7 @@ class SettingsWindow(BaseWindow):
         self.model_discovery_manager = QNetworkAccessManager(self)
         self.model_discovery_reply = None
         self.model_discovery_request_id = 0
+        self.model_discovery_key_withheld = False
         self.model_discovery_timeout = QTimer(self)
         self.model_discovery_timeout.setSingleShot(True)
         self.model_discovery_timeout.timeout.connect(self._on_model_discovery_timeout)
@@ -437,7 +441,13 @@ class SettingsWindow(BaseWindow):
                 f'Status: {status}\nLast successful sync: {formatted_last_success}'
             )
         error = settings.get('last_error') or ''
-        self.sync_error_label.setText(f'Last error: {error}' if error else '')
+        notice = settings.get('last_notice') or ''
+        lines = []
+        if error:
+            lines.append(f'Last error: {error}')
+        if notice:
+            lines.append(f'Note: {notice}')
+        self.sync_error_label.setText('\n'.join(lines))
 
     @staticmethod
     def _sync_connection_fingerprint(settings):
@@ -1123,8 +1133,12 @@ class SettingsWindow(BaseWindow):
         request = QNetworkRequest(url)
         request.setHeader(QNetworkRequest.UserAgentHeader, 'WhisperWriter')
         api_key = self.api_key_input.text().strip() if self.api_key_input else ''
+        self.model_discovery_key_withheld = False
         if api_key:
-            request.setRawHeader(b'Authorization', f'Bearer {api_key}'.encode('utf-8'))
+            if self._may_send_form_key(api_key):
+                request.setRawHeader(b'Authorization', f'Bearer {api_key}'.encode('utf-8'))
+            else:
+                self.model_discovery_key_withheld = True
 
         self.api_model_refresh_button.setEnabled(False)
         self._set_model_discovery_status('Loading...')
@@ -1132,6 +1146,19 @@ class SettingsWindow(BaseWindow):
         self.model_discovery_reply = reply
         reply.finished.connect(lambda reply=reply, request_id=request_id: self._on_model_discovery_finished(reply, request_id))
         self.model_discovery_timeout.start(5000)
+
+    def _may_send_form_key(self, api_key):
+        """
+        Send the key only where it would be used after saving: to the server it is saved
+        for, or, when the user has typed a key into this form, to the server shown next to
+        it. Never over plain HTTP to another computer.
+        """
+        base_url = self.api_base_url_input.text() if self.api_base_url_input else ''
+        base_url = base_url.strip() or api_credentials.DEFAULT_BASE_URL
+        if not api_credentials.transport_allows_key(base_url):
+            return False
+        saved_key = getattr(self, 'baseline_values', {}).get(('model_options', 'api', 'api_key')) or ''
+        return api_key != saved_key or api_credentials.may_send_key(base_url)
 
     def _on_model_discovery_timeout(self):
         reply = self.model_discovery_reply
@@ -1156,7 +1183,10 @@ class SettingsWindow(BaseWindow):
             self._set_model_discovery_status('Unavailable', error=True)
             return
         if status_code is not None and int(status_code) >= 400:
-            self._set_model_discovery_status(f'HTTP {int(status_code)}', error=True)
+            status = f'HTTP {int(status_code)}'
+            if int(status_code) in (401, 403) and getattr(self, 'model_discovery_key_withheld', False):
+                status += ' (API key not sent to this server until saved for it)'
+            self._set_model_discovery_status(status, error=True)
             return
 
         try:
@@ -1195,11 +1225,16 @@ class SettingsWindow(BaseWindow):
     def save_settings(self):
         """Save application and local synchronization settings."""
         try:
-            self.collect_current_values()
+            values = self.collect_current_values()
             sync_values = self.collect_sync_values()
         except ValueError as error:
             QMessageBox.warning(self, 'Invalid setting', str(error))
             return
+        invalid = self.invalid_settings(values)
+        if invalid:
+            QMessageBox.warning(self, 'Invalid setting', '\n'.join(invalid))
+            return
+        bind_key = self._should_bind_api_key(values)
         if sync_values.get('enabled'):
             sync_error = self._sync_validation_error(sync_values)
             if sync_error:
@@ -1208,6 +1243,12 @@ class SettingsWindow(BaseWindow):
         changed = self.changed_settings()
         sync_changed = sync_values != self.sync_baseline_values
         if not changed and not sync_changed:
+            if bind_key:
+                ConfigManager.ensure_config_directory()
+                api_credentials.bind_api_key(
+                    ConfigManager.env_path(),
+                    values.get(('model_options', 'api', 'base_url')),
+                )
             self.close()
             return
 
@@ -1225,6 +1266,13 @@ class SettingsWindow(BaseWindow):
             ConfigManager.ensure_config_directory()
             set_key(ConfigManager.env_path(), 'OPENAI_API_KEY', api_key)
             os.environ['OPENAI_API_KEY'] = api_key
+            # The key belongs to the server it was saved with. A server URL that later
+            # arrives by synchronization does not receive it until saved here for it.
+            if bind_key or not os.getenv(api_credentials.API_KEY_HOST_ENV):
+                api_credentials.bind_api_key(
+                    ConfigManager.env_path(),
+                    ConfigManager.get_config_value('model_options', 'api', 'base_url'),
+                )
 
             # Remove the API key from the config
             ConfigManager.set_config_value(None, 'model_options', 'api', 'api_key')
@@ -1255,6 +1303,63 @@ class SettingsWindow(BaseWindow):
             QMessageBox.information(self, 'Settings Saved', 'Settings have been saved. The application will now restart.')
             self.settings_saved.emit()
             self.close()
+
+    def _should_bind_api_key(self, values):
+        """
+        Decide whether saving binds the API key to the server shown in the form: always
+        when the user edited the key or server here, otherwise only after confirmation
+        (e.g. the server arrived through synchronization and the key is withheld from it).
+        """
+        key_path = ('model_options', 'api', 'api_key')
+        url_path = ('model_options', 'api', 'base_url')
+        api_key = values.get(key_path) or ''
+        base_url = values.get(url_path) or api_credentials.DEFAULT_BASE_URL
+        baseline = getattr(self, 'baseline_values', {})
+        if not api_key:
+            return False
+        if api_key != (baseline.get(key_path) or '') or values.get(url_path) != baseline.get(url_path):
+            return True
+        if not values.get(('model_options', None, 'use_api')):
+            return False
+        if api_credentials.may_send_key(base_url) or not api_credentials.transport_allows_key(base_url):
+            return False
+        answer = QMessageBox.question(
+            self,
+            'Use API key with this server?',
+            f'Your API key is saved for {api_credentials.bound_host()}, so it is not sent to '
+            f'{api_credentials.endpoint_host(base_url)}.\n\nSend your API key to '
+            f'{api_credentials.endpoint_host(base_url)} from now on?',
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
+
+    def _setting_label(self, category, sub_category, key):
+        name = f"{category}_{sub_category}_{key}_label" if sub_category else f"{category}_{key}_label"
+        label = self.findChild(QLabel, name)
+        text = label.text().rstrip(':') if label and label.text() else ''
+        return text or key.replace('_', ' ').capitalize()
+
+    def invalid_settings(self, values):
+        """Return readable errors for form values that must not be saved."""
+        errors = []
+        candidate = copy.deepcopy(getattr(ConfigManager._instance, 'config', None) or {})
+        # Fields of the backend that is not in use are hidden; they must not block saving.
+        inactive = 'local' if values.get(('model_options', None, 'use_api')) else 'api'
+        for (category, sub_category, key), value in values.items():
+            path = tuple(part for part in (category, sub_category, key) if part)
+            reason = None if sub_category == inactive else validate_value(self.schema, path, value)
+            if reason:
+                errors.append(f'{self._setting_label(category, sub_category, key)}: {reason}.')
+            target = candidate
+            for part in path[:-1]:
+                target = target.setdefault(part, {})
+            target[path[-1]] = value
+        if not errors:
+            for path, reason in validate_config_combination(candidate).items():
+                sub_category = path[1] if len(path) == 3 else None
+                errors.append(f'{self._setting_label(path[0], sub_category, path[-1])}: {reason}.')
+        return errors
 
     def save_setting(self, widget, category, sub_category, key, meta):
         value = self.get_widget_value_typed(widget, meta.get('type'))

@@ -3,6 +3,8 @@ import os
 import tempfile
 from dotenv import load_dotenv
 
+from config_validation import sanitize_config
+
 class ConfigManager:
     _instance = None
 
@@ -180,6 +182,14 @@ class ConfigManager:
                         print("Invalid configuration: expected a mapping. Using defaults.")
             except yaml.YAMLError:
                 print("Error in configuration file. Using default configuration.")
+            except (OSError, UnicodeDecodeError) as error:
+                print(f"Could not read configuration file ({error}). Using default configuration.")
+
+        # One bad value (hand edited, synchronized by an older release, or from an older
+        # schema) must not crash startup or silently change behavior: use its default.
+        for path, value, reason in sanitize_config(self.schema, self.config):
+            shown = '<hidden>' if path[-1] == 'api_key' else repr(value)
+            print(f"Ignoring invalid setting {'.'.join(path)}={shown}: {reason}. Using the default.")
 
     @classmethod
     def save_config(cls, config_path=None):

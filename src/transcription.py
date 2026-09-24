@@ -1,14 +1,13 @@
 import io
 import logging
-import os
 import time
-from urllib.parse import urlparse
 import numpy as np
 import soundfile as sf
 from faster_whisper import WhisperModel
 from openai import OpenAI
 
 from utils import ConfigManager
+import api_credentials
 import glossary
 
 logger = logging.getLogger(__name__)
@@ -84,10 +83,10 @@ def transcribe_api(audio_data, sample_rate=None, model_name=None):
     Transcribe an audio file using the OpenAI API.
     """
     model_options = ConfigManager.get_config_section('model_options')
-    base_url = model_options['api']['base_url'] or 'https://api.openai.com/v1'
-    api_key = os.getenv('OPENAI_API_KEY') or model_options['api'].get('api_key')
-    if not api_key and urlparse(base_url).hostname != 'api.openai.com':
-        api_key = 'not-needed'
+    base_url = model_options['api']['base_url'] or api_credentials.DEFAULT_BASE_URL
+    # The key only goes to the server it was saved for (see api_credentials); any other
+    # OpenAI-compatible server receives a placeholder, which keyless servers accept.
+    api_key = api_credentials.api_key_for(base_url, model_options['api'].get('api_key'))
 
     # Convert numpy array to WAV file
     byte_io = io.BytesIO()
@@ -97,7 +96,8 @@ def transcribe_api(audio_data, sample_rate=None, model_name=None):
 
     start = time.time()
     with OpenAI(api_key=api_key, base_url=base_url,
-                timeout=model_options['api'].get('timeout_seconds', 120),
+                # An empty field is stored as None, which the SDK reads as "no timeout".
+                timeout=model_options['api'].get('timeout_seconds') or 120,
                 max_retries=0) as client:
         response = client.audio.transcriptions.create(
             model=model_name or model_options['api']['model'],
