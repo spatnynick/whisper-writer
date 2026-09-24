@@ -38,8 +38,9 @@ and branch testing"):
    3.10–3.14 with the test suite and an Xvfb/PulseAudio dictation; local-model inference and GPU
    (now CUDA 12 + cuDNN 9) remain unverified.
 4. Done: `update.sh` rebuilds a venv whose interpreter no longer runs (`--rebuild-venv` on
-   demand), keeping the previous one until the new one works. It still installs after the
-   fast-forward rather than staging a complete new environment first.
+   demand), keeping the previous one until the new one works. It still installs into the
+   existing venv after the checkout, but a failed install now returns to the previous commit
+   and reinstalls its dependencies instead of leaving new code on an old environment.
 5. Open: PyQt6 migration and GStreamer-free sound playback.
 
 The original findings and plan follow.

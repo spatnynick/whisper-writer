@@ -27,7 +27,9 @@ this fork, `upstream` is the original (unmaintained since Aug 2024) project.
 - **Testing a branch:** Settings → About → Application branch → Switch and restart (or
   `./update.sh --switch <branch>`). Updates then follow that branch, including force-pushes
   when the checkout has no commits of its own. When the branch is merged and deleted, the Update
-  action says so; switch back to `main` the same way.
+  action says so; switch back to `main` the same way. Switching to `main` is also the way back
+  to a working version: pip installs main's pins, downgrading where needed. A switch or update
+  whose dependencies fail to install returns to the previous commit and its dependencies.
 
 ## Current maintenance notes (2026-09-06)
 
