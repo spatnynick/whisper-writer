@@ -70,18 +70,17 @@ venv_works() {
 install_requirements() {
     local python="$1"
     echo "Reconciling $(dirname "$(dirname "$python")") against requirements.txt..."
-    "$python" -m pip install -q -r requirements.txt
-    "$python" -m pip check
+    "$python" -m pip install -q -r requirements.txt && "$python" -m pip check
 }
 
 # Recreate venv/ with the system python3 (or $WHISPER_WRITER_PYTHON). The previous venv is
 # moved aside and restored if the new one cannot be built, so a failed rebuild (missing apt
-# packages, no network) leaves the installation as it was.
+# packages, no network) leaves the venv as it was. Returns non-zero on failure.
 rebuild_venv() {
     local python="${WHISPER_WRITER_PYTHON:-python3}"
     if ! "$python" -c 'import sys; sys.exit(not ((3, 10) <= sys.version_info[:2] <= (3, 14)))' 2>/dev/null; then
         echo "Error: $python is missing or not Python 3.10-3.14; set WHISPER_WRITER_PYTHON." >&2
-        exit 1
+        return 1
     fi
     echo "Rebuilding venv/ with $("$python" --version 2>&1)..."
     rm -rf venv.previous
@@ -97,7 +96,29 @@ rebuild_venv() {
     if [ -e venv.previous ]; then
         mv venv.previous venv
     fi
-    exit 1
+    return 1
+}
+
+# Bring venv/ in line with the checked-out requirements.txt. Returns non-zero on failure.
+reconcile_venv() {
+    local rebuild="$1"
+    # Always reconcile the venv against requirements.txt, not just when it textually
+    # changed in this pull — a venv can drift out of sync with a committed
+    # requirements.txt for reasons this script can't see (a manual `git pull`/rebase
+    # done outside update.sh, a previous run interrupted mid-install, a venv rebuilt
+    # from an older checkout, etc). pip is idempotent and fast when nothing is missing,
+    # so the safety net costs a couple of seconds even on a no-op update. pip also
+    # downgrades packages that the checked-out lock pins lower (switching back to main).
+    # A venv whose interpreter disappeared (e.g. after a distribution upgrade replaced
+    # Python 3.12 with 3.14) cannot be repaired by pip and is rebuilt instead.
+    if [ "$rebuild" -eq 1 ]; then
+        rebuild_venv
+    elif ! venv_works; then
+        echo "venv/ is missing or its Python interpreter no longer runs."
+        rebuild_venv
+    else
+        install_requirements venv/bin/python3
+    fi
 }
 
 restart_running_instance() {
@@ -258,27 +279,36 @@ main() {
     echo "WhisperWriter update — installation: $install_dir"
     require_clean_tree
 
+    # Where to return if the new code's dependencies cannot be installed.
+    local previous_branch previous_commit
+    previous_branch="$(git symbolic-ref -q --short HEAD || true)"
+    previous_commit="$(git rev-parse HEAD)"
+
     if [ -n "$target" ]; then
         switch_branch "$target"
     else
         update_current_branch "$check_only"
     fi
 
-    # Always reconcile the venv against requirements.txt, not just when it textually
-    # changed in this pull — a venv can drift out of sync with a committed
-    # requirements.txt for reasons this script can't see (a manual `git pull`/rebase
-    # done outside update.sh, a previous run interrupted mid-install, a venv rebuilt
-    # from an older checkout, etc). pip is idempotent and fast when nothing is missing,
-    # so the safety net costs a couple of seconds even on a no-op update.
-    # A venv whose interpreter disappeared (e.g. after a distribution upgrade replaced
-    # Python 3.12 with 3.14) cannot be repaired by pip and is rebuilt instead.
-    if [ "$rebuild" -eq 1 ]; then
-        rebuild_venv
-    elif ! venv_works; then
-        echo "venv/ is missing or its Python interpreter no longer runs."
-        rebuild_venv
-    else
-        install_requirements venv/bin/python3
+    if ! reconcile_venv "$rebuild"; then
+        if [ "$(git rev-parse HEAD)" != "$previous_commit" ]; then
+            # Never leave new code on an environment that could not be updated for it:
+            # go back to the version that was running and restore its dependencies.
+            echo "Error: installing the dependencies failed; returning to ${previous_branch:-the previous commit} (${previous_commit:0:7})." >&2
+            if [ -n "$previous_branch" ]; then
+                git checkout --quiet -B "$previous_branch" "$previous_commit"
+            else
+                git checkout --quiet --detach "$previous_commit"
+            fi
+            if venv_works && install_requirements venv/bin/python3; then
+                echo "Returned to ${previous_branch:-${previous_commit:0:7}}; nothing was changed."
+            else
+                echo "Error: the previous dependencies could not be restored either; run $0 again when the network is available." >&2
+            fi
+        else
+            echo "Error: installing the dependencies failed; run $0 again to retry." >&2
+        fi
+        exit 1
     fi
 
     echo "Update complete."

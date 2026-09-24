@@ -139,6 +139,16 @@ esac
             self.assertEqual(result.returncode, 10, result.stderr)
             self.assertIn('UPDATE_AVAILABLE', result.stdout)
 
+# A venv interpreter whose "pip install" fails when requirements.txt names a package that
+# cannot be installed, and which records the requirements it was asked to install.
+FAKE_VENV_PYTHON = '''#!/bin/sh
+if [ "$1 $2 $3" = "-m pip install" ]; then
+    cat requirements.txt >> installed.log
+    ! grep -q uninstallable requirements.txt
+fi
+'''
+
+
 class BranchSwitchTests(unittest.TestCase):
     """update.sh against real Git repositories: switching, rewritten and deleted branches."""
 
@@ -149,7 +159,7 @@ class BranchSwitchTests(unittest.TestCase):
         self.remote.mkdir()
         self.git(self.remote, 'init', '-b', 'main')
         (self.remote / 'update.sh').write_text(Path('update.sh').read_text())
-        (self.remote / '.gitignore').write_text('venv/\nvenv.previous/\n')
+        (self.remote / '.gitignore').write_text('venv/\nvenv.previous/\ninstalled.log\n')
         (self.remote / 'requirements.txt').write_text('pip\n')
         self.commit(self.remote, 'initial')
         self.git(self.remote, 'checkout', '-b', 'feature')
@@ -160,7 +170,7 @@ class BranchSwitchTests(unittest.TestCase):
         # A venv whose interpreter works; update.sh only runs "-m pip ..." through it.
         (self.checkout / 'venv/bin').mkdir(parents=True)
         python = self.checkout / 'venv/bin/python3'
-        python.write_text('#!/bin/sh\nexit 0\n')
+        python.write_text(FAKE_VENV_PYTHON)
         python.chmod(0o755)
 
     def tearDown(self):
@@ -248,6 +258,44 @@ class BranchSwitchTests(unittest.TestCase):
         self.assertEqual(self.update('--switch').returncode, 2)
         self.assertEqual(self.update('--check-only', '--switch', 'main').returncode, 2)
 
+    def test_switch_back_to_main_installs_mains_pins(self):
+        self.git(self.remote, 'checkout', 'feature')
+        (self.remote / 'requirements.txt').write_text('pip\nnumpy==9.9\n')
+        self.commit(self.remote, 'feature needs newer numpy')
+        self.git(self.remote, 'checkout', 'main')
+        self.assertEqual(self.update('--switch', 'feature', '--no-restart').returncode, 0)
+        back = self.update('--switch', 'main', '--no-restart')
+        self.assertEqual(back.returncode, 0, back.stdout + back.stderr)
+        self.assertEqual(self.head(self.checkout), self.head(self.remote, 'main'))
+        # The last install used main's lock, which is how pip downgrades the packages.
+        self.assertTrue((self.checkout / 'installed.log').read_text().endswith('pip\n'))
+
+    def test_failed_install_returns_to_the_previous_branch(self):
+        self.git(self.remote, 'checkout', 'feature')
+        (self.remote / 'requirements.txt').write_text('uninstallable-package\n')
+        self.commit(self.remote, 'broken dependencies')
+        self.git(self.remote, 'checkout', 'main')
+        main_head = self.head(self.checkout)
+
+        failed = self.update('--switch', 'feature', '--no-restart')
+        self.assertEqual(failed.returncode, 1, failed.stdout + failed.stderr)
+        self.assertIn('returning to main', failed.stderr)
+        self.assertIn('Returned to main', failed.stdout)
+        self.assertEqual(self.git(self.checkout, 'rev-parse', '--abbrev-ref', 'HEAD'), 'main')
+        self.assertEqual(self.head(self.checkout), main_head)
+        # main's requirements were reinstalled after the failed attempt.
+        self.assertTrue((self.checkout / 'installed.log').read_text().endswith('pip\n'))
+
+    def test_failed_install_rolls_back_an_update(self):
+        old_head = self.head(self.checkout)
+        (self.remote / 'requirements.txt').write_text('uninstallable-package\n')
+        self.commit(self.remote, 'broken dependencies on main')
+        failed = self.update('--no-restart')
+        self.assertEqual(failed.returncode, 1, failed.stdout + failed.stderr)
+        self.assertEqual(self.head(self.checkout), old_head)
+        self.assertEqual(self.git(self.checkout, 'status', '--porcelain'), '')
+        self.assertEqual(self.update('--check-only').returncode, 10)
+
     def test_venv_with_missing_interpreter_is_rebuilt(self):
         python = self.checkout / 'venv/bin/python3'
         python.unlink()
@@ -268,7 +316,7 @@ class BranchSwitchTests(unittest.TestCase):
         result = self.update('--rebuild-venv', '--no-restart', env={'WHISPER_WRITER_PYTHON': str(failing)})
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('restoring the previous one', result.stderr)
-        self.assertEqual((self.checkout / 'venv/bin/python3').read_text(), '#!/bin/sh\nexit 0\n')
+        self.assertEqual((self.checkout / 'venv/bin/python3').read_text(), FAKE_VENV_PYTHON)
         self.assertFalse((self.checkout / 'venv.previous').exists())
 
 

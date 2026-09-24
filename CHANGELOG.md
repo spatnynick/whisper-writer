@@ -23,6 +23,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   of its own, reports a branch deleted on GitHub (exit code 11; the tray explains how to switch
   back), rebuilds a venv whose Python interpreter disappeared (e.g. after a distribution
   upgrade), and fetches with an explicit refspec so single-branch clones can switch branches.
+  When the dependencies of new code cannot be installed, an update or branch switch returns to
+  the previous commit and restores its dependencies instead of leaving new code on an old venv.
 
 ### Security
 - No known vulnerabilities in the locked dependencies (pip-audit, 2026-09-24): `anyio` advisories

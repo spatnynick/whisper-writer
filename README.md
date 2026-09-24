@@ -122,6 +122,9 @@ for Retry. The updater:
 - rebuilds `venv/` when its Python interpreter no longer runs (for example after a distribution
   upgrade replaced Python 3.12 with 3.14), keeping the previous one as `venv.previous/` until the
   new one works;
+- goes back to the previous version (code and dependencies) when the new dependencies cannot
+  be installed, e.g. without network access, so the installation never mixes new code with an
+  old environment;
 - restarts WhisperWriter. A failed update is reported and does not restart.
 
 WhisperWriter also checks for updates in the background (`update_check_interval_hours`) and
@@ -143,7 +146,10 @@ another branch of the fork (use **Refresh list** to load the current branches fr
 press **Switch and restart**. WhisperWriter downloads that branch, installs its dependencies and
 restarts on it; the tray Update action then follows that branch, so new commits pushed to it
 arrive like any other update. When you are done testing, switch back to `main` the same way.
-Your settings are kept, and invalid values from an older or newer branch fall back to defaults
+This also works as a way back to a working version: switching installs exactly what `main` is
+on GitHub, and pip downgrades every package to the version `main` pins (packages only the test
+branch needed stay installed, unused). If the switch cannot install the dependencies, it
+returns to the branch you were on. Your settings are kept, and invalid values from an older or newer branch fall back to defaults
 instead of preventing startup.
 
 If a followed branch is deleted on GitHub (typically after its pull request was merged), the
