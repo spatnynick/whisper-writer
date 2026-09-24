@@ -62,6 +62,9 @@ class InputSimulator:
             text (str): The text to type.
         """
         interval = ConfigManager.get_config_value('post_processing', 'writing_key_press_delay')
+        if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not interval >= 0:
+            # time.sleep(None) or a negative delay would abort typing after one character.
+            interval = 0.005
         logger.debug(f"typewrite: method={self.input_method} interval={interval} chars={len(text)}")
         start = time.time()
         if self.input_method == 'pynput':

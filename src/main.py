@@ -17,6 +17,7 @@ from ui.status_window import StatusWindow
 from transcription import create_local_model
 from input_simulation import InputSimulator
 from utils import ConfigManager
+from api_credentials import migrate_api_key_binding
 from config_sync import (
     SYNC_STATUS_CHECKING_SYNCHRONIZATION,
     SYNC_STATUS_CONNECTION_SUCCESSFUL,
@@ -31,6 +32,7 @@ from config_sync import (
     SYNC_STATUS_SYNCHRONIZING,
     SYNC_STATUS_TESTING_CONNECTION,
     SYNC_STATUS_UP_TO_DATE,
+    ENDPOINT_PATHS,
     SyncWorker,
     load_sync_settings,
     save_sync_settings,
@@ -69,6 +71,7 @@ class WhisperWriterApp(QObject):
         self._retrying = False
         self._shutdown_action = None
         self._continue_recording = False
+        self._hold_output_worker = None
         self._update_process = None
         self._update_phase = None
         self._model_slot = 0
@@ -95,6 +98,7 @@ class WhisperWriterApp(QObject):
         self._sync_current_succeeded = False
         self._sync_settings = None
         self._sync_needs_attention = False
+        self._sync_confirming = False
         self._sync_timer = QTimer(self)
         self._sync_timer.timeout.connect(self._on_sync_timer)
         self._update_available = False
@@ -105,6 +109,14 @@ class WhisperWriterApp(QObject):
         self.deactivationRequested.connect(self.on_deactivation, Qt.QueuedConnection)
         self.cancelRequested.connect(self.on_cancel_key, Qt.QueuedConnection)
         ConfigManager.initialize()
+        try:
+            ConfigManager.ensure_config_directory()
+            migrate_api_key_binding(
+                ConfigManager.env_path(),
+                ConfigManager.get_config_value('model_options', 'api', 'base_url'),
+            )
+        except OSError:
+            logger.exception('Could not record the API key server binding')
         self._sync_settings = load_sync_settings()
         self._sync_needs_attention = self._sync_settings.get('status') == SYNC_STATUS_ERROR
         self._configure_update_check_timer(check_now=True)
@@ -156,8 +168,18 @@ class WhisperWriterApp(QObject):
         if going_to_sleep:
             if getattr(self, 'escape_guard', None):
                 self.escape_guard.close()
-            if getattr(self, 'result_thread', None):
-                self.stop_result_thread()
+            worker = getattr(self, 'result_thread', None)
+            if worker and worker.isRunning():
+                self._continue_recording = False
+                self._cancel_model_hold()
+                if self._recording_worker_active(worker):
+                    # Keep the captured audio: a cancelled recording is offered through
+                    # Retry Transcription instead of being discarded.
+                    worker.cancel_recording()
+                else:
+                    # Let a running transcription finish, but do not type its result
+                    # after resume, when focus may be on the lock screen or elsewhere.
+                    self._hold_output_worker = worker
             return
         QTimer.singleShot(2000, self._restart_key_listener_after_resume)
 
@@ -277,12 +299,14 @@ class WhisperWriterApp(QObject):
             'recording', 'transcribing'
         )
 
-    def _set_sync_status(self, status, error=None, remote_commit=None, persist=False):
+    def _set_sync_status(self, status, error=None, remote_commit=None, persist=False, notice=None):
         """Update synchronization status without opening a dialog or notification."""
         settings = load_sync_settings()
         settings['status'] = status
         if error is not None:
             settings['last_error'] = error
+        if notice is not None:
+            settings['last_notice'] = notice
         if status in (SYNC_STATUS_UP_TO_DATE, SYNC_STATUS_CONNECTION_SUCCESSFUL):
             settings['last_error'] = ''
         if remote_commit:
@@ -440,25 +464,14 @@ class WhisperWriterApp(QObject):
                 self._sync_current_succeeded = True
                 return
 
-            if action == 'pull':
-                if result.get('changed'):
-                    old_config = getattr(getattr(ConfigManager, '_instance', None), 'config', None)
-                    ConfigManager.replace_config(result['config'])
-                    try:
-                        ConfigManager.save_config()
-                    except Exception:
-                        if old_config is not None:
-                            ConfigManager.replace_config(old_config)
-                        raise
-                    if getattr(self, 'settings_window', None):
-                        self.settings_window.update_widgets_from_config()
-                        self.settings_window.baseline_values = self.settings_window.collect_current_values()
-                    self._sync_current_restart_after = True
-                elif getattr(self, '_sync_current_restart_notice', False):
-                    # A manual Pull only needs a restart when it actually changed the
-                    # application configuration. The save-triggered first sync keeps its
-                    # original restart request so a first-run app still initializes.
-                    self._sync_current_restart_after = False
+            if self._apply_sync_updates(result):
+                self._sync_current_restart_after = True
+            elif getattr(self, '_sync_current_restart_notice', False):
+                # A manual Pull only needs a restart when it actually changed the
+                # application configuration. The save-triggered first sync keeps its
+                # original restart request so a first-run app still initializes.
+                self._sync_current_restart_after = False
+            notice = self._sync_notice(result)
 
             if action != 'auto' or result.get('initial_sync_completed'):
                 self._persist_sync_operation_metadata(result)
@@ -472,15 +485,131 @@ class WhisperWriterApp(QObject):
                 bool(result.get('changed'))
                 or action in ('test', 'pull', 'push')
                 or bool(previous_settings.get('last_error'))
+                or notice != (previous_settings.get('last_notice') or '')
             )
             self._set_sync_status(
                 SYNC_STATUS_UP_TO_DATE,
                 remote_commit=remote_commit,
                 persist=persist_success,
+                notice=notice,
             )
+            if notice and notice != (previous_settings.get('last_notice') or ''):
+                logger.warning('Synchronization note: %s', notice)
+                if getattr(self, 'tray_icon', None):
+                    self.tray_icon.showMessage('WhisperWriter synchronization', notice,
+                                               QSystemTrayIcon.Warning, 8000)
             self._sync_current_succeeded = True
         except Exception as error:
             self._on_sync_failed(str(error))
+
+    @staticmethod
+    def _sync_notice(result):
+        """Summarize non-fatal merge/validation outcomes of a synchronization result."""
+        if not isinstance(result, dict):
+            return ''
+        parts = []
+        rejected = result.get('rejected') or []
+        if rejected:
+            parts.append('Ignored invalid remote values: ' + '; '.join(
+                f'{path} ({reason})' for path, reason in rejected))
+        conflicts = result.get('conflicts') or []
+        if conflicts:
+            parts.append('Changed on this and another computer, kept the remote value: '
+                         + ', '.join(conflicts))
+        return ' '.join(parts)
+
+    def _confirm_remote_endpoint(self, previous, value):
+        """Ask before recordings are sent to a server chosen on another computer."""
+        answer = QMessageBox.question(
+            None,
+            'Synchronized server change',
+            'Synchronized settings change the transcription server\n'
+            f'from: {previous or "(default)"}\n'
+            f'to: {value or "(default)"}\n\n'
+            'Recordings will be sent to the new server. Your API key is not sent to it '
+            'until you save it for that server in Settings.\n\n'
+            'Apply the new server? Choosing No keeps this computer\'s server and stops '
+            'synchronizing provider settings on this computer.',
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
+
+    def _stop_syncing_provider(self):
+        """Disable the provider area locally after a declined endpoint change."""
+        settings = load_sync_settings()
+        settings['areas']['provider'] = False
+        self._sync_settings = save_sync_settings(settings)
+        current = getattr(self, '_sync_current_settings', None)
+        if isinstance(current, dict) and isinstance(current.get('areas'), dict):
+            current['areas']['provider'] = False
+        window = getattr(self, 'settings_window', None)
+        checkbox = getattr(window, 'sync_area_checkboxes', {}).get('provider') if window else None
+        if window is not None and checkbox is not None:
+            window.sync_settings = self._sync_settings
+            if window.isVisible():
+                checkbox.setChecked(False)
+            else:
+                window.update_sync_widgets_from_settings()
+                window.sync_baseline_values = window.collect_sync_values()
+
+    def _apply_sync_updates(self, result):
+        """
+        Apply a synchronization result's per-setting updates to the *current* config.
+
+        Each update carries the value the worker started from. A setting edited locally
+        while Git was running keeps the newer local value; the next synchronization
+        publishes it. Returns whether the saved configuration changed.
+        """
+        updates = result.get('updates') if isinstance(result, dict) else None
+        instance = getattr(ConfigManager, '_instance', None)
+        current = getattr(instance, 'config', None)
+        if not updates or current is None:
+            return False
+
+        def get(config, path):
+            for key in path:
+                if not isinstance(config, dict) or key not in config:
+                    return None
+                config = config[key]
+            return config
+
+        applicable = []
+        for path, previous, value in updates:
+            path = tuple(path)
+            if get(current, path) != previous:
+                continue
+            if path in ENDPOINT_PATHS:
+                self._sync_confirming = True
+                try:
+                    accepted = self._confirm_remote_endpoint(previous, value)
+                finally:
+                    self._sync_confirming = False
+                if not accepted:
+                    self._stop_syncing_provider()
+                    continue
+            applicable.append((path, value))
+        if not applicable:
+            return False
+
+        candidate = copy.deepcopy(current)
+        for path, value in applicable:
+            target = candidate
+            for key in path[:-1]:
+                if not isinstance(target.get(key), dict):
+                    target[key] = {}
+                target = target[key]
+            target[path[-1]] = copy.deepcopy(value)
+        ConfigManager.replace_config(candidate)
+        try:
+            ConfigManager.save_config()
+        except Exception:
+            ConfigManager.replace_config(current)
+            raise
+        if getattr(self, 'settings_window', None):
+            self.settings_window.update_widgets_from_config()
+            self.settings_window.baseline_values = self.settings_window.collect_current_values()
+        return True
 
     def _on_sync_failed(self, error):
         logger.warning('Synchronization failed: %s', error)
@@ -488,6 +617,11 @@ class WhisperWriterApp(QObject):
         self._set_sync_status(SYNC_STATUS_ERROR, error=error, persist=True)
 
     def _on_sync_worker_finished(self):
+        if getattr(self, '_sync_confirming', False):
+            # The endpoint confirmation dialog runs a nested event loop, which can deliver
+            # the worker's finished signal before its result has been applied.
+            QTimer.singleShot(50, self._on_sync_worker_finished)
+            return
         worker = getattr(self, '_sync_worker', None)
         self._sync_worker = None
         if worker is not None:
@@ -500,7 +634,11 @@ class WhisperWriterApp(QObject):
         operation_succeeded = getattr(self, '_sync_current_succeeded', False)
         self._sync_current_settings = None
         self._sync_current_succeeded = False
-        if restart_after and operation_succeeded:
+        # A restart requested by saving settings must happen even when the synchronization
+        # fails (e.g. offline): the settings are already saved and would otherwise stay
+        # unapplied. The failure remains visible as the persisted sync error. A manual Pull
+        # (restart_notice) restarts only when it succeeded and changed the configuration.
+        if restart_after and (operation_succeeded or not restart_notice):
             self._sync_pending_action = None
             self._sync_pending_settings = None
             self._sync_pending_restart_notice = False
@@ -1266,6 +1404,7 @@ class WhisperWriterApp(QObject):
             self.failed_recordings.pop(0)
         self._retrying = False
         self.result_thread = None
+        self._hold_output_worker = None
         self._update_retry_actions()
         if thread:
             thread.deleteLater()
@@ -1307,6 +1446,15 @@ class WhisperWriterApp(QObject):
             return
         self.last_transcript = result
         self.copy_last_transcript_action.setEnabled(bool(result))
+        held = getattr(self, '_hold_output_worker', None)
+        if held is not None and held is getattr(self, 'result_thread', None):
+            self.tray_icon.showMessage(
+                'WhisperWriter',
+                'A transcription finished while the computer was suspended. '
+                'Use Copy Last Transcript to insert it.',
+                QSystemTrayIcon.Information, 8000,
+            )
+            return
 
         # Stop listening while typing: pynput's global listener also observes the
         # synthetic keystrokes typewrite() injects (well-documented pynput behavior —

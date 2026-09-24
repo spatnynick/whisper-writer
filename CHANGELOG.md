@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
+### Security
+- The API key is bound to the server it was saved for and sent only there, over HTTPS or to
+  localhost. A synchronized server URL change requires confirmation before recordings go there.
+- Transcribed text is no longer printed to the terminal/restart log.
+
+### Fixed
+- Glossary phrase replacements match whole words only ("This is a problem." no longer becomes
+  "This iSAProblem.").
+- Settings synchronization merges per setting instead of overwriting whole areas, applies
+  remote updates without discarding settings edited during a sync, validates remote values,
+  recovers from an unpushed commit after the remote moved, and no longer synchronizes the
+  microphone index or the local model's device/compute type.
+- Settings, config.yaml and synchronized values are validated against the schema (types,
+  options, ranges, hotkey names, URLs); invalid loaded values fall back to defaults instead of
+  crashing startup. A misspelled or empty hotkey falls back to the default shortcut.
+- An empty request timeout or key delay no longer disables the timeout or aborts typing.
+- Saving settings restarts the app even if the push-on-save synchronization fails.
+- Suspending during recording keeps the audio for Retry; a transcription finishing across
+  suspend is kept for Copy Last Transcript instead of being discarded or typed after resume.
+- The evdev input backend is only chosen when input devices are readable, picks up keyboards
+  connected later, and no longer overrides SIGTERM/SIGINT.
+
 ### Added
 - Optional Git synchronization for independently selected configuration areas, with automatic
   branch discovery, background push/pull, interval checks, local Git authentication settings and

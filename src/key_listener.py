@@ -1,4 +1,8 @@
+import errno
 import logging
+import os
+import select
+import threading
 import time
 from abc import ABC, abstractmethod
 from enum import Enum, auto
@@ -202,6 +206,41 @@ class KeyCode(Enum):
     MOUSE_SIDE1 = auto()
     MOUSE_SIDE2 = auto()
     MOUSE_SIDE3 = auto()
+
+DEFAULT_ACTIVATION_KEY = 'ctrl+shift+space'
+
+MODIFIER_GROUPS = {
+    'CTRL': frozenset({KeyCode.CTRL_LEFT, KeyCode.CTRL_RIGHT}),
+    'SHIFT': frozenset({KeyCode.SHIFT_LEFT, KeyCode.SHIFT_RIGHT}),
+    'ALT': frozenset({KeyCode.ALT_LEFT, KeyCode.ALT_RIGHT}),
+    'META': frozenset({KeyCode.META_LEFT, KeyCode.META_RIGHT}),
+}
+
+
+def parse_key_combination(combination_string) -> Set[KeyCode | frozenset[KeyCode]]:
+    """
+    Parse a '+'-separated shortcut such as ``ctrl+shift+space``.
+
+    Raises ValueError for anything that is not a complete, known combination: an empty
+    value, an empty part (``ctrl++space``) or an unknown key name. Silently dropping an
+    unknown part would change which keys trigger recording.
+    """
+    if not isinstance(combination_string, str) or not combination_string.strip():
+        raise ValueError('the shortcut is empty')
+    keys = set()
+    for part in combination_string.split('+'):
+        key = part.strip().upper()
+        if not key:
+            raise ValueError('the shortcut contains an empty key name')
+        if key in MODIFIER_GROUPS:
+            keys.add(MODIFIER_GROUPS[key])
+            continue
+        try:
+            keys.add(KeyCode[key])
+        except KeyError:
+            raise ValueError(f'unknown key "{part.strip()}"') from None
+    return keys
+
 
 class InputBackend(ABC):
     """
@@ -462,32 +501,23 @@ class KeyListener:
         self._listening = False
 
     def load_activation_keys(self):
-        """Load activation keys from configuration."""
+        """Load activation keys from configuration, falling back to the default on errors."""
         key_combination = ConfigManager.get_config_value('recording_options', 'activation_key')
-        keys = self.parse_key_combination(key_combination)
+        try:
+            keys = parse_key_combination(key_combination)
+        except ValueError as error:
+            # A misspelled key must not silently shrink the chord (e.g. to Ctrl+Shift, which
+            # would fire on every Ctrl+Shift shortcut) or leave it empty (which would fire on
+            # every key release). Use the known-good default until the setting is fixed.
+            logger.warning('Invalid activation key %r (%s); using %s instead.',
+                           key_combination, error, DEFAULT_ACTIVATION_KEY)
+            print(f'Invalid activation key {key_combination!r}: {error}. Using {DEFAULT_ACTIVATION_KEY}.')
+            keys = parse_key_combination(DEFAULT_ACTIVATION_KEY)
         self.set_activation_keys(keys)
 
     def parse_key_combination(self, combination_string: str) -> Set[KeyCode | frozenset[KeyCode]]:
         """Parse a string representation of key combination into a set of KeyCodes."""
-        keys = set()
-        key_map = {
-            'CTRL': frozenset({KeyCode.CTRL_LEFT, KeyCode.CTRL_RIGHT}),
-            'SHIFT': frozenset({KeyCode.SHIFT_LEFT, KeyCode.SHIFT_RIGHT}),
-            'ALT': frozenset({KeyCode.ALT_LEFT, KeyCode.ALT_RIGHT}),
-            'META': frozenset({KeyCode.META_LEFT, KeyCode.META_RIGHT}),
-        }
-
-        for key in combination_string.upper().split('+'):
-            key = key.strip()
-            if key in key_map:
-                keys.add(key_map[key])
-            else:
-                try:
-                    keycode = KeyCode[key]
-                    keys.add(keycode)
-                except KeyError:
-                    print(f"Unknown key: {key}")
-        return keys
+        return parse_key_combination(combination_string)
 
     def set_activation_keys(self, keys: Set[KeyCode]):
         """Set the activation keys for the KeyChord."""
@@ -532,46 +562,65 @@ class EvdevBackend(InputBackend):
     Backend for handling input events using the evdev library.
     """
 
+    # How often the listener looks for keyboards connected after it started.
+    RESCAN_SECONDS = 2.0
+
     @classmethod
     def is_available(cls) -> bool:
-        """Check if the evdev library is available."""
+        """
+        Check that evdev is installed *and* this user can read at least one input device.
+        Without read access (the user is not in the ``input`` group) the backend would
+        start with no devices and the hotkey would silently never fire.
+        """
         try:
             import evdev
-            return True
-        except ImportError:
+            return any(os.access(path, os.R_OK) for path in evdev.list_devices())
+        except Exception:
             return False
 
     def __init__(self):
         """Initialize the EvdevBackend."""
-        self.devices: List[evdev.InputDevice] = []
+        self.devices = []
         self.key_map: Optional[dict] = None
         self.evdev = None
         self.thread: Optional[threading.Thread] = None
         self.stop_event: Optional[threading.Event] = None
+        self._next_rescan = 0.0
 
     def start(self):
         """Start the evdev backend."""
+        # SIGTERM/SIGINT keep their default behavior: the application must still exit
+        # when update.sh or the session asks it to, instead of only stopping this backend.
         import evdev
-        import threading
         self.evdev = evdev
         self.key_map = self._create_key_map()
-
-        # Initialize input devices
-        self.devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
+        self.devices = []
+        self._open_new_devices()
+        if not self.devices:
+            raise RuntimeError('No readable input devices; add the user to the "input" group or use pynput.')
         self.stop_event = threading.Event()
-        self._setup_signal_handler()
         self._start_listening()
 
-    def _setup_signal_handler(self):
-        """Set up signal handlers for graceful shutdown."""
-        import signal
-
-        def signal_handler(signum, frame):
-            print("Received termination signal. Stopping evdev backend...")
-            self.stop()
-
-        signal.signal(signal.SIGTERM, signal_handler)
-        signal.signal(signal.SIGINT, signal_handler)
+    def _open_new_devices(self):
+        """Open readable key-capable devices that are not open yet (startup and hotplug)."""
+        known = {device.path for device in self.devices}
+        for path in self.evdev.list_devices():
+            if path in known or not os.access(path, os.R_OK):
+                continue
+            try:
+                device = self.evdev.InputDevice(path)
+            except OSError as error:
+                logger.debug('Skipping input device %s: %s', path, error)
+                continue
+            try:
+                has_keys = self.evdev.ecodes.EV_KEY in device.capabilities()
+            except OSError:
+                has_keys = False
+            if has_keys:
+                self.devices.append(device)
+            else:
+                device.close()
+        self._next_rescan = time.monotonic() + self.RESCAN_SECONDS
 
     def stop(self):
         """Stop the evdev backend and clean up resources."""
@@ -582,6 +631,7 @@ class EvdevBackend(InputBackend):
             self.thread.join(timeout=1)  # Wait for up to 1 second
             if self.thread.is_alive():
                 print("Thread did not terminate in time. Forcing exit.")
+            self.thread = None
 
         # Close all devices
         for device in self.devices:
@@ -593,15 +643,15 @@ class EvdevBackend(InputBackend):
 
     def _start_listening(self):
         """Start the listening thread."""
-        import threading
-        self.thread = threading.Thread(target=self._listen_loop)
+        self.thread = threading.Thread(target=self._listen_loop, daemon=True)
         self.thread.start()
 
     def _listen_loop(self):
         """Main loop for listening to input events."""
-        import select
         while not self.stop_event.is_set():
             try:
+                if time.monotonic() >= self._next_rescan:
+                    self._open_new_devices()
                 # Wait for input events with a timeout of 0.1 seconds
                 r, _, _ = select.select(self.devices, [], [], 0.1)
                 for device in r:
@@ -610,6 +660,7 @@ class EvdevBackend(InputBackend):
                 if self.stop_event.is_set():
                     break
                 print(f"Unexpected error in _listen_loop: {e}")
+                time.sleep(0.1)
 
     def _read_device_events(self, device):
         """Read and process events from a single device."""
@@ -622,12 +673,16 @@ class EvdevBackend(InputBackend):
 
     def _handle_device_error(self, device, error):
         """Handle errors that occur when reading from a device."""
-        import errno
         if isinstance(error, BlockingIOError) and error.errno == errno.EAGAIN:
             return  # Non-blocking IO is expected, just continue
         if isinstance(error, OSError) and (error.errno == errno.EBADF or error.errno == errno.ENODEV):
             print(f"Device {device.path} is no longer available. Removing it.")
-            self.devices.remove(device)
+            if device in self.devices:
+                self.devices.remove(device)
+            try:
+                device.close()
+            except Exception:
+                pass
         else:
             print(f"Unexpected error reading device: {error}")
 

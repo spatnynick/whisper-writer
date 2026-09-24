@@ -59,7 +59,10 @@ def apply_glossary_corrections(text):
     glossary = _load()
 
     for wrong, right in glossary['static_map'].items():
-        text = re.sub(re.escape(wrong), right, text, flags=re.IGNORECASE)
+        # Match whole words only: "s a p" must not fire inside "is a problem". The
+        # replacement is literal text, not a regex template.
+        pattern = r'(?<!\w)' + re.escape(str(wrong)) + r'(?!\w)'
+        text = re.sub(pattern, lambda _match, right=str(right): right, text, flags=re.IGNORECASE)
 
     fuzzy_cfg = glossary.get('fuzzy', {})
     if not fuzzy_cfg.get('enabled'):
