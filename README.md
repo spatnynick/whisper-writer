@@ -1,7 +1,7 @@
 # <img src="./assets/ww-logo.png" alt="WhisperWriter icon" width="25" height="25"> WhisperWriter
 
 > **Personal fork** of [savbell/whisper-writer](https://github.com/savbell/whisper-writer)
-> (unmaintained upstream since August 2024), run on several Ubuntu/X11 computers. This README
+> (unmaintained upstream since August 2024) for Linux/X11. This README
 > describes the fork as it is today. [FORK_NOTES.md](FORK_NOTES.md) records why individual
 > changes were made, [REVIEW.md](REVIEW.md) the code reviews, remaining risks and feature plans,
 > and [CHANGELOG.md](CHANGELOG.md) what changed.
@@ -32,7 +32,7 @@ The transcription can either be done locally through the [faster-whisper Python 
 
 ### Supported platforms
 
-- **Linux with X11** (developed and used on Ubuntu 24.04 with KDE). Wayland sessions need the
+- **Linux with X11** (developed on Ubuntu 24.04). Wayland sessions need the
   `evdev` input backend (read access to `/dev/input`) and the `ydotool`/`dotool` output methods.
 - **CPython 3.10 – 3.14** (Ubuntu 22.04 through 26.04). Every supported version is covered by the
   single lock file `requirements.txt`, so a distribution upgrade does not need other pins.

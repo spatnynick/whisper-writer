@@ -121,7 +121,7 @@ The suite includes real Git checks against a temporary local repository for dirt
 ahead and divergent installations, and supervised-update checks without restarting
 the actual application. Installed dependency consistency, Python compilation and shell
 syntax pass. Offscreen Settings renders were inspected. The running app and its real
-configuration were not restarted or modified; microphone/NAS/GPU behavior still needs
+configuration were not restarted or modified; microphone/API server/GPU behavior still needs
 normal-use testing. The older verification counts below describe earlier review stages.
 
 The multilingual follow-up also replaces the English prose prompt with glossary keywords and
@@ -247,8 +247,8 @@ of selected models. Seven isolated X11 checks also pass, covering suppression, e
 grabs, the real pynput observer, popup focus, Settings activation and Escape discarding Settings
 edits without quitting. Python compilation, shell syntax, `git diff --check`, installed
 dependency consistency, and offscreen application startup/shutdown with hardware adapters
-mocked were also checked. Real microphone dictation, NAS transcription, GPU inference,
-suspend/resume and operation on the other computers still need normal use validation.
+mocked were also checked. Real microphone dictation, API server transcription, GPU inference,
+suspend/resume and operation on further computers still need normal use validation.
 
 The tray-update follow-up adds shell checks for current and newer remote commits, plus GUI
 checks for the current, available, failed and worker-active update paths. The updater uses the

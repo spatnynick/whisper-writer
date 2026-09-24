@@ -1,7 +1,7 @@
 # Fork notes
 
 Personal fork of [savbell/whisper-writer](https://github.com/savbell/whisper-writer), a
-hotkey-triggered dictation tool. Run on three computers from this same fork; `origin` is
+hotkey-triggered dictation tool, run on several computers from this same fork; `origin` is
 this fork, `upstream` is the original (unmaintained since Aug 2024) project.
 
 ## Dependencies, updates and branch testing (2026-09-24)
@@ -23,7 +23,7 @@ this fork, `upstream` is the original (unmaintained since Aug 2024) project.
 - **HTTPS model discovery never worked on Ubuntu 22.04+.** Every PyQt5-Qt5 wheel is built
   against OpenSSL 1.1: 5.15.2 loads OpenSSL 3 partially and fails the handshake, 5.15.14+
   refuse to load it. Discovery now uses `urllib` in a thread (`src/model_discovery.py`).
-- **GPU:** ctranslate2 4.8 needs CUDA 12 + cuDNN 9. These machines use the NAS API.
+- **GPU:** ctranslate2 4.8 needs CUDA 12 + cuDNN 9. Without them, use a transcription API server.
 - **Testing a branch:** Settings → About → Application branch → Switch and restart (or
   `./update.sh --switch <branch>`). Updates then follow that branch, including force-pushes
   when the checkout has no commits of its own. When the branch is merged and deleted, the Update
@@ -197,19 +197,18 @@ No `pyenv` needed — the system Python works directly (any of 3.10–3.14).
 ```
 gh auth login --hostname github.com --git-protocol https --web   # interactive: browser approval
 sudo mkdir -p /opt/whisper-writer
-sudo chown bogo:bogo /opt/whisper-writer
+sudo chown "$USER:$USER" /opt/whisper-writer
 git clone https://github.com/spatnynick/whisper-writer.git /opt/whisper-writer
 cd /opt/whisper-writer
 git remote add upstream https://github.com/savbell/whisper-writer.git
 python3 -m venv venv
 venv/bin/python3 -m pip install -r requirements.txt
 venv/bin/python3 -m pip check
-sudo chown bogo:users /opt/whisper-writer   # directory itself; files stay bogo:bogo
+sudo chown "$USER:users" /opt/whisper-writer   # directory itself; files stay $USER:$USER
 ```
 
-Lives at `/opt/whisper-writer`, owned by `bogo` (not root) so it can be updated with a plain
-`git pull` — no `sudo` needed day to day, matching how `openwhispr` and `whispering` were set
-up under `/opt` before. Then `src/config.yaml` (gitignored, per-machine — see below), the KDE
+Lives at `/opt/whisper-writer`, owned by the desktop user (not root) so it can be updated with a
+plain `git pull` — no `sudo` needed day to day. Then `src/config.yaml` (gitignored, per-machine — see below), the KDE
 desktop entry/icon (`Exec=/opt/whisper-writer/start.sh`, `Path=/opt/whisper-writer`), and
 `start.sh` (already executable, tracked in git). Launch via `/opt/whisper-writer/start.sh` or
 the "WhisperWriter" KDE menu entry.
@@ -220,13 +219,13 @@ both hardcode the venv's absolute path at creation time and break silently (fall
 the system Python, or a broken shebang) if the directory is renamed or moved afterward. This
 is exactly why `start.sh` calls `venv/bin/python3` directly instead of sourcing `activate`.
 
-## Config (kept identical on all three machines)
+## Example configuration
 
 The configuration now lives in `~/.config/whisper-writer/config.yaml`, outside the checkout (an
-old `src/config.yaml` is still read until the next save writes the new location), so each machine can diverge and settings synchronization
-can share selected areas,
-but in practice all three should carry this exact content — self-hosted STT on the NAS,
-`Ctrl+Shift+Space` press-to-toggle:
+old `src/config.yaml` is still read until the next save writes the new location), so each
+computer can diverge and settings synchronization can share selected areas. A typical setup —
+a self-hosted OpenAI-compatible transcription server on the local network, `Ctrl+Shift+Space`
+press-to-toggle:
 
 ```yaml
 misc:
@@ -236,7 +235,7 @@ misc:
 model_options:
   api:
     api_key: null
-    base_url: http://192.168.98.3:8100/v1
+    base_url: http://<server>:8100/v1
     model: deepdml/faster-whisper-large-v3-turbo-ct2
     secondary_model: null
   common:
@@ -298,7 +297,7 @@ correctness fixes:
   `input_simulation.py typewrite()` (timing), `key_listener.py on_input_event()` (every raw key
   event + activate/deactivate), `result_thread.py` (recording/stream timing, alongside the
   existing `console_print` calls, not replacing them), `transcription.py transcribe_api()`
-  (HTTP call duration specifically, to isolate NAS network latency). Off by default — zero
+  (HTTP call duration specifically, to isolate server network latency). Off by default — zero
   behavior change when the flag isn't passed. `run.py` now forwards its own argv to the
   `src/main.py` subprocess it spawns (it silently dropped all args before).
 - **New app icon and status-popup icons.** `assets/ww-logo.svg`/`.png`/`.ico` — a flat indigo
@@ -542,7 +541,7 @@ OpenAI transcription API requires a prose prompt to match the audio language.
 
 Requires `rapidfuzz` (prebuilt wheel, no apt dep — added to `requirements.txt`).
 
-## Syncing changes across the three machines (2026-09-01)
+## Syncing changes across computers (2026-09-01)
 
 `update.sh` (new, tracked, executable) — run `./update.sh` on any machine to pull the
 latest commits from `origin` and restart the running instance in one step. It:
