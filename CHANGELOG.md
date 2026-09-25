@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
+### Changed
+- Updating and switching branches are no longer refused while a failed or cancelled recording
+  is waiting for Retry (for example after cancelling with Escape); the restart discards it.
+
+### Fixed
+- Recording and Retry could start while a branch switch was installing, and the restart after
+  the switch then lost that recording.
+
 ### Added
 - Settings → About → Application branch: switch this installation to another branch of the
   fork (e.g. to test a pull request before merging) and back to `main`. The tray Update action
