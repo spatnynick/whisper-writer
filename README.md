@@ -110,8 +110,9 @@ writes the new location.
 ### Updating
 
 Use the tray's **Update** action, or run `./update.sh` in a terminal. Finish dictation first:
-the update refuses to start while recording, transcribing or while a failed recording is waiting
-for Retry. The updater:
+the update refuses to start while recording or transcribing. A failed or cancelled recording
+waiting for Retry does not block it; the restart after the update discards that recording.
+The updater:
 
 - fetches the branch this installation follows from `origin` and fast-forwards to it. A branch
   that was force-pushed on GitHub (for example a test branch restarted from `main`) is followed

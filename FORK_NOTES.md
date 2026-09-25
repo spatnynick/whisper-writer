@@ -50,8 +50,9 @@ without a desktop notification. Every successful update then automatically resta
 app so the new checkout and dependencies are loaded; failed updates do not restart it.
 The icon returns to normal after a check failure or when no update is available; the latter
 also opens the information popup. The action refuses to update while a recording/transcription
-is active or a failed recording is waiting for retry, so audio work is not interrupted or
-silently lost.
+is active, so audio work is not interrupted. A failed or cancelled recording waiting for retry
+does not block it (2026-09-25): it is usually a recording cancelled on purpose with Escape, and
+the restart discards it. Recording and Retry stay disabled while an update or branch switch installs.
 
 The launcher preserves `OPENAI_API_KEY`; `.env` supplies it when absent from the environment.
 A custom endpoint without a key receives a placeholder. `model_options.api.timeout_seconds`

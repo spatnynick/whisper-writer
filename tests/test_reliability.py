@@ -127,15 +127,30 @@ class ReliabilityTests(unittest.TestCase):
         app.tray_icon.showMessage.assert_not_called()
         app.update_action.setEnabled.assert_not_called()
 
-    def test_update_is_blocked_while_failed_audio_is_recoverable(self):
+    def test_failed_audio_waiting_for_retry_does_not_block_update(self):
         app = self.app()
         app.failed_recordings = [('audio', 16000)]
-        with patch.object(app, '_show_update_message') as show:
+        with patch.object(app, '_show_update_message') as show, patch('main.QProcess') as process:
             app.check_for_updates()
-        show.assert_called_once()
-        self.assertIn('Retry', show.call_args.args[1])
-        app.tray_icon.showMessage.assert_not_called()
-        app.update_action.setEnabled.assert_not_called()
+            app._update_process = None
+            app._start_update()
+            app._update_process = None
+            app.switch_app_branch('main')
+        show.assert_not_called()
+        self.assertEqual(
+            [call.args[1] for call in process.return_value.start.call_args_list],
+            [['--check-only'], ['--no-restart'], ['--switch', 'main', '--no-restart']])
+
+    def test_recording_and_retry_wait_while_update_or_branch_switch_installs(self):
+        for phase in ('updating', 'switching branch'):
+            app = self.app()
+            app.failed_recordings = [(np.ones(1600), 16000)]
+            app._update_phase = phase
+            with patch.object(app, '_start_worker') as start:
+                app.start_result_thread()
+                app.retry_transcription()
+            start.assert_not_called()
+            self.assertEqual(len(app.failed_recordings), 1)
 
     def test_update_check_and_apply_change_tray_icon_without_notifications(self):
         app = self.app()
@@ -162,15 +177,11 @@ class ReliabilityTests(unittest.TestCase):
         self.assertEqual(show.call_args.args[0], 'Update failed')
 
     def test_update_rechecks_recording_after_fetch(self):
-        for retained in (False, True):
-            app = self.app()
-            if retained:
-                app.failed_recordings = [(np.ones(1600), 16000)]
-            else:
-                app.result_thread = Mock()
-            with patch('main.QProcess') as process:
-                app._start_update()
-            process.assert_not_called()
+        app = self.app()
+        app.result_thread = Mock()
+        with patch('main.QProcess') as process:
+            app._start_update()
+        process.assert_not_called()
 
     def test_background_update_check_runs_check_only_silently(self):
         app = self.app()

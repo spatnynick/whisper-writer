@@ -385,7 +385,7 @@ class WhisperWriterApp(QObject):
             self._queue_sync(action, settings, restart_after, restart_notice)
             self._set_sync_status(SYNC_STATUS_PAUSED_UNTIL_IDLE, persist=False)
             return
-        if getattr(self, '_shutdown_action', None) or getattr(self, '_update_phase', None) == 'updating':
+        if getattr(self, '_shutdown_action', None) or self._installing_update():
             self._queue_sync(action, settings, restart_after, restart_notice)
             return
 
@@ -810,15 +810,19 @@ class WhisperWriterApp(QObject):
             return True
         if self._shutdown_action:
             return True
-        if self.result_thread is not None or self.failed_recordings:
-            detail = (
-                'Retry the failed transcription or start a new recording before updating.'
-                if self.failed_recordings and self.result_thread is None
-                else 'Finish the current recording or transcription before updating.'
-            )
-            self._show_update_message('Update unavailable', detail, QMessageBox.Warning)
+        # A failed or cancelled recording waiting for retry does not block updates; the
+        # restart discards it.
+        if self.result_thread is not None:
+            self._show_update_message(
+                'Update unavailable',
+                'Finish the current recording or transcription before updating.',
+                QMessageBox.Warning)
             return True
         return False
+
+    def _installing_update(self):
+        """True while update.sh may change the checkout; the app restarts when it succeeds."""
+        return getattr(self, '_update_phase', None) in ('updating', 'switching branch')
 
     def check_for_updates(self):
         """Check origin/<current branch> without blocking the GUI."""
@@ -920,7 +924,7 @@ class WhisperWriterApp(QObject):
 
     def _start_update(self, arguments=None, phase='updating'):
         # Recording or shutdown may have begun while the asynchronous fetch ran.
-        if self._shutdown_action or self.result_thread is not None or self.failed_recordings:
+        if self._shutdown_action or self.result_thread is not None:
             self._restore_update_indicator()
             return
         self._set_update_available(False)
@@ -1226,7 +1230,7 @@ class WhisperWriterApp(QObject):
             self.update_tray_icon(self.current_status)
 
     def retry_transcription(self):
-        if not self.failed_recordings or self.result_thread is not None or self._shutdown_action or getattr(self, '_update_phase', None) == 'updating':
+        if not self.failed_recordings or self.result_thread is not None or self._shutdown_action or self._installing_update():
             return
         recording = self.failed_recordings[0]
         audio_data, sample_rate = recording[:2]
@@ -1281,7 +1285,7 @@ class WhisperWriterApp(QObject):
         self._continue_recording = False
         if getattr(self, 'key_listener', None):
             self.key_listener.stop()
-        if getattr(self, '_update_phase', None) == 'updating':
+        if self._installing_update():
             return
         thread = getattr(self, 'result_thread', None)
         if thread and thread.isRunning():
@@ -1326,7 +1330,7 @@ class WhisperWriterApp(QObject):
         """
         Called when the activation key combination is pressed.
         """
-        if self._shutdown_action or getattr(self, '_update_phase', None) == 'updating':
+        if self._shutdown_action or self._installing_update():
             return
         if self.result_thread and self.result_thread.isRunning():
             if self._recording_worker_active(self.result_thread):
@@ -1371,7 +1375,7 @@ class WhisperWriterApp(QObject):
         """
         Start the result thread to record audio and transcribe it.
         """
-        if self._shutdown_action or self.result_thread is not None or getattr(self, '_update_phase', None) == 'updating':
+        if self._shutdown_action or self.result_thread is not None or self._installing_update():
             return
 
         # Starting a new recording explicitly abandons the previous failed audio.
