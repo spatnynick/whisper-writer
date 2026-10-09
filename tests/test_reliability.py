@@ -1123,6 +1123,41 @@ class ReliabilityTests(unittest.TestCase):
         self.assertFalse(app._output_to_clipboard())
         self.assertEqual(app._session_clipboard_text, '')
 
+    def test_continuous_press_while_segment_transcribes_stops_instead_of_switching(self):
+        app = self._transcribing_app()
+        app._continue_recording = True
+        app.on_activation()
+        self.assertFalse(app._continue_recording)
+        self.assertFalse(app._output_to_clipboard())
+        # Once nothing more will be recorded, a press switches the final transcript.
+        app.on_activation()
+        self.assertTrue(app._output_to_clipboard())
+
+    def test_one_time_switch_ends_with_its_session(self):
+        app = self._transcribing_app()
+        app.toggle_session_output()
+        app.result_thread.is_cancelled = False
+        app.result_thread.transcription_failed = False
+        app.result_thread.transcription_succeeded = True
+        app.result_thread.retained_recording = None
+        app.on_worker_finished()
+        self.assertIsNone(app._session_output_clipboard)
+        self.assertFalse(app._output_to_clipboard())
+        self.assertNotIn('clipboard', app.tray_icon.setToolTip.call_args.args[0])
+
+    def test_one_time_switch_survives_continuous_segments(self):
+        app = self._transcribing_app()
+        app.toggle_session_output()
+        app._continue_recording = True
+        app.result_thread.is_cancelled = False
+        app.result_thread.transcription_failed = False
+        app.result_thread.transcription_succeeded = True
+        app.result_thread.retained_recording = None
+        with patch.object(app, 'start_result_thread') as start:
+            app.on_worker_finished()
+        start.assert_called_once()
+        self.assertTrue(app._output_to_clipboard())
+
     def test_session_switch_ignored_without_running_worker(self):
         app = self.app()
         app._session_output_clipboard = None

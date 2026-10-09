@@ -217,7 +217,7 @@ class WhisperWriterApp(QObject):
         self.current_status = 'idle'
         self.last_transcript = None
         # None follows post_processing.output_to_clipboard; True/False is a switch made
-        # during the current recording session and is dropped when the next one starts.
+        # during the current recording session and is dropped when that session ends.
         self._session_output_clipboard = None
         self._session_clipboard_text = ''
 
@@ -1427,9 +1427,14 @@ class WhisperWriterApp(QObject):
                 else:
                     self._finish_short_model_press()
             elif self.current_status == 'transcribing':
-                # Pressing the shortcut again while waiting for the transcript switches
-                # where it goes, so a long transcription need not hold the window focus.
-                self.toggle_session_output()
+                if self._continue_recording:
+                    # Continuous mode: a pause already ended this segment, so the press
+                    # means "stop dictating" — finish after it instead of starting another.
+                    self._continue_recording = False
+                else:
+                    # Pressing the shortcut again while waiting for the final transcript
+                    # switches where it goes, so it need not hold the window focus.
+                    self.toggle_session_output()
             return
 
         self._continue_recording = ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous'
@@ -1572,6 +1577,9 @@ class WhisperWriterApp(QObject):
                 reset_selection=False,
             )
         else:
+            # The one-time output switch ends with its session; the tray and popup
+            # return to the saved default.
+            self._reset_session_output()
             self.on_status_changed('idle')
             self.update_tray_icon('idle')
             if getattr(self, 'status_window', None):

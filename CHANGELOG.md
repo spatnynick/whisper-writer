@@ -17,7 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Clipboard output, so a long transcription no longer has to keep the target window focused:
   - one-time switch for the current recording: the clipboard button in the status popup (while
     recording or transcribing), or pressing the activation shortcut again while transcribing;
-    pressing or clicking again switches back to typing;
+    pressing or clicking again switches back to typing; the switch ends with the session.
+    In continuous mode a press while a segment is still transcribing ends dictation instead
+    (it was ignored before); the next press switches the final transcript;
   - persistent default: **Output to Clipboard** in the tray menu (saved as
     `post_processing.output_to_clipboard`, also in Settings → Text output), shown by a clipboard
     badge on the tray icon.
