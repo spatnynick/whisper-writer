@@ -13,6 +13,7 @@ class StatusWindow(BaseWindow):
     statusSignal = pyqtSignal(str)
     closeSignal = pyqtSignal()
     retryRequested = pyqtSignal()
+    clipboardToggleRequested = pyqtSignal()
 
     def __init__(self):
         """
@@ -94,6 +95,18 @@ class StatusWindow(BaseWindow):
         self.retry_button.hide()
         self.retry_button.clicked.connect(self.retryRequested.emit)
         status_layout.addWidget(self.retry_button)
+        # Checkable: checked means this recording's transcript goes to the clipboard.
+        # NoFocus plus the window's WindowDoesNotAcceptFocus keeps the target app focused.
+        self.clipboard_button = QPushButton()
+        self.clipboard_button.setIcon(QIcon.fromTheme(
+            'edit-paste', self.style().standardIcon(QStyle.SP_FileDialogContentsView)))
+        self.clipboard_button.setCheckable(True)
+        self.clipboard_button.setFixedSize(32, 28)
+        self.clipboard_button.setFocusPolicy(Qt.NoFocus)
+        self.clipboard_button.hide()
+        self.clipboard_button.clicked.connect(self._on_clipboard_clicked)
+        self.set_output_clipboard(False)
+        status_layout.addWidget(self.clipboard_button)
         status_layout.addStretch(1)
 
         self.main_layout.addLayout(status_layout)
@@ -102,9 +115,31 @@ class StatusWindow(BaseWindow):
         """Show the active model on the small line below the recording state."""
         self.model_label.setText(f'Model: {model_name}' if model_name else '')
 
+    def set_output_clipboard(self, clipboard):
+        """Show whether the current transcript will be typed or copied to the clipboard."""
+        self.output_clipboard = bool(clipboard)
+        self.clipboard_button.setChecked(self.output_clipboard)
+        self.clipboard_button.setToolTip(
+            'Output: clipboard. Click to type at the cursor instead.' if self.output_clipboard
+            else 'Output: type at the cursor. Click to copy to the clipboard instead.')
+        self._refresh_status_text()
+
+    def _on_clipboard_clicked(self):
+        # The app owns the state; undo the button's own toggle until it confirms.
+        self.clipboard_button.setChecked(self.output_clipboard)
+        self.clipboardToggleRequested.emit()
+
+    def _refresh_status_text(self):
+        base = {'recording': 'Recording...', 'transcribing': 'Transcribing...'}.get(
+            getattr(self, '_status', None))
+        if base:
+            self.status_label.setText(f'{base} → clipboard' if self.output_clipboard else base)
+
     def show_retry(self):
         """Show a retry action after cancelled audio has been retained."""
         self._stopPulse()
+        self._status = 'cancel'
+        self.clipboard_button.hide()
         self.status_label.setText('Cancelled')
         self.icon_label.setPixmap(self.microphone_pixmap)
         self.border_color = self.cancelled_border_color
@@ -206,16 +241,21 @@ class StatusWindow(BaseWindow):
         """
         Update the status window based on the given status.
         """
+        self._status = status
+        if status in ('recording', 'transcribing'):
+            self.clipboard_button.show()
+        else:
+            self.clipboard_button.hide()
         if status == 'recording':
             self.retry_button.hide()
-            self.status_label.setText('Recording...')
+            self._refresh_status_text()
             self._startPulse(self.microphone_pixmap, period=0.9)
             self.border_color = self.recording_border_color
             self.update()
             self.show()
         elif status == 'transcribing':
             self.retry_button.hide()
-            self.status_label.setText('Transcribing...')
+            self._refresh_status_text()
             # Slightly slower period than recording, to read as "processing" rather
             # than the more urgent recording pulse.
             self._startPulse(self.pencil_pixmap, period=1.4)

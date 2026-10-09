@@ -2,12 +2,13 @@ import copy
 import os
 import sys
 import logging
+import shutil
 import subprocess
 from datetime import datetime
 from audioplayer import AudioPlayer
 from PyQt5.QtCore import QObject, QProcess, QTimer, Qt, QPoint, pyqtSignal, pyqtSlot
 from PyQt5.QtDBus import QDBusConnection
-from PyQt5.QtGui import QIcon, QPainter, QColor
+from PyQt5.QtGui import QGuiApplication, QIcon, QPainter, QColor
 from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QAction, QMessageBox, QStyle
 
 from key_listener import KeyListener
@@ -215,6 +216,10 @@ class WhisperWriterApp(QObject):
         self.result_thread = None
         self.current_status = 'idle'
         self.last_transcript = None
+        # None follows post_processing.output_to_clipboard; True/False is a switch made
+        # during the current recording session and is dropped when the next one starts.
+        self._session_output_clipboard = None
+        self._session_clipboard_text = ''
 
         # Kept alive as instance attributes rather than created fresh per play() call: a
         # non-blocking AudioPlayer's GStreamer pipeline is torn down as soon as the Python
@@ -230,6 +235,7 @@ class WhisperWriterApp(QObject):
             self.status_window = StatusWindow()
             self.status_window.closeSignal.connect(self.stop_result_thread)
             self.status_window.retryRequested.connect(self.retry_transcription)
+            self.status_window.clipboardToggleRequested.connect(self.toggle_session_output)
 
         self.create_tray_icon()
         self.key_listener.start()
@@ -283,6 +289,14 @@ class WhisperWriterApp(QObject):
         self.retry_transcript_action.triggered.connect(self.retry_transcription)
         tray_menu.addAction(self.retry_transcript_action)
         self._update_retry_actions()
+
+        self.output_clipboard_action = QAction(self._clipboard_icon(), 'Output to Clipboard', self.app)
+        self.output_clipboard_action.setCheckable(True)
+        self.output_clipboard_action.setChecked(bool(
+            ConfigManager.get_config_value('post_processing', 'output_to_clipboard')))
+        self.output_clipboard_action.setToolTip('Copy transcripts to the clipboard instead of typing them')
+        self.output_clipboard_action.toggled.connect(self.set_persistent_output_clipboard)
+        tray_menu.addAction(self.output_clipboard_action)
 
         tray_menu.addSeparator()
 
@@ -1055,12 +1069,14 @@ class WhisperWriterApp(QObject):
         if getattr(self, 'tray_icon', None):
             self.update_tray_icon(getattr(self, 'current_status', 'idle'))
 
-    def _tray_icon_with_markers(self, icon):
+    def _tray_icon_with_markers(self, icon, status_markers=True):
         """Overlay small status dots on the idle icon: red (top-right) when sync needs
-        attention, yellow (bottom-right) when a background check found an update."""
-        needs_sync_marker = getattr(self, '_sync_needs_attention', False)
-        needs_update_marker = getattr(self, '_update_available', False)
-        if not needs_sync_marker and not needs_update_marker:
+        attention, yellow (bottom-right) when a background check found an update, and a
+        clipboard badge (bottom-left) when transcripts go to the clipboard."""
+        needs_sync_marker = status_markers and getattr(self, '_sync_needs_attention', False)
+        needs_update_marker = status_markers and getattr(self, '_update_available', False)
+        clipboard_marker = self._output_to_clipboard()
+        if not needs_sync_marker and not needs_update_marker and not clipboard_marker:
             return icon
         try:
             pixmap = icon.pixmap(64, 64)
@@ -1078,6 +1094,14 @@ class WhisperWriterApp(QObject):
                 center = QPoint(pixmap.width() - radius - 2, pixmap.height() - radius - 2)
                 painter.setBrush(QColor(251, 192, 45))
                 painter.drawEllipse(center, radius, radius)
+            if clipboard_marker:
+                size = pixmap.width() * 7 // 16
+                badge = self._clipboard_icon().pixmap(size, size)
+                if not badge.isNull():
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(QColor(255, 255, 255, 230))
+                    painter.drawEllipse(0, pixmap.height() - size - 2, size + 2, size + 2)
+                    painter.drawPixmap(1, pixmap.height() - size - 1, badge)
             painter.end()
             return QIcon(pixmap)
         except (AttributeError, TypeError):
@@ -1095,6 +1119,8 @@ class WhisperWriterApp(QObject):
         model_suffix = ''
         if status in ('recording', 'transcribing', 'error') and active_model:
             model_suffix = f'\nModel: {active_model}'
+        if self._output_to_clipboard():
+            model_suffix += '\nOutput: clipboard'
         idle_icon = self._tray_icon_with_markers(self.tray_icon_idle)
         if status != 'error' and not ConfigManager.get_config_value('misc', 'show_tray_status_icon'):
             self.tray_icon.setIcon(idle_icon)
@@ -1102,10 +1128,10 @@ class WhisperWriterApp(QObject):
             return
 
         if status == 'recording':
-            self.tray_icon.setIcon(self.tray_icon_recording)
+            self.tray_icon.setIcon(self._tray_icon_with_markers(self.tray_icon_recording, status_markers=False))
             self.tray_icon.setToolTip(f'WhisperWriter — Recording...{model_suffix}')
         elif status == 'transcribing':
-            self.tray_icon.setIcon(self.tray_icon_transcribing)
+            self.tray_icon.setIcon(self._tray_icon_with_markers(self.tray_icon_transcribing, status_markers=False))
             self.tray_icon.setToolTip(f'WhisperWriter — Transcribing...{model_suffix}')
         elif status == 'error':
             self.tray_icon.setIcon(self.tray_icon_error)
@@ -1115,7 +1141,60 @@ class WhisperWriterApp(QObject):
             self.tray_icon.setIcon(idle_icon)
             sync_suffix = ' — Sync needs attention' if getattr(self, '_sync_needs_attention', False) else ''
             update_suffix = ' — Update available' if getattr(self, '_update_available', False) else ''
-            self.tray_icon.setToolTip(f'WhisperWriter — Idle{sync_suffix}{update_suffix}')
+            clipboard_suffix = '\nOutput: clipboard' if self._output_to_clipboard() else ''
+            self.tray_icon.setToolTip(f'WhisperWriter — Idle{sync_suffix}{update_suffix}{clipboard_suffix}')
+
+    def _clipboard_icon(self):
+        return QIcon.fromTheme('edit-paste', self.app.style().standardIcon(QStyle.SP_FileDialogContentsView))
+
+    def _output_to_clipboard(self):
+        """Where the current (or next) transcript goes: the session switch, else the setting."""
+        session = getattr(self, '_session_output_clipboard', None)
+        if session is not None:
+            return session
+        return bool(ConfigManager.get_config_value('post_processing', 'output_to_clipboard'))
+
+    def _refresh_output_indicators(self):
+        if getattr(self, 'status_window', None):
+            self.status_window.set_output_clipboard(self._output_to_clipboard())
+        if getattr(self, 'tray_icon', None):
+            self.update_tray_icon(getattr(self, 'current_status', None) or 'idle')
+
+    def _reset_session_output(self):
+        self._session_output_clipboard = None
+        self._session_clipboard_text = ''
+        self._refresh_output_indicators()
+
+    def toggle_session_output(self):
+        """Switch only the active recording session between typing and the clipboard."""
+        worker = getattr(self, 'result_thread', None)
+        if not worker or not worker.isRunning():
+            return
+        self._session_output_clipboard = not self._output_to_clipboard()
+        logger.info('Session output switched to %s',
+                    'clipboard' if self._session_output_clipboard else 'typing')
+        self._refresh_output_indicators()
+
+    def set_persistent_output_clipboard(self, enabled):
+        """Tray toggle: save the default output target so it survives restarts."""
+        enabled = bool(enabled)
+        if bool(ConfigManager.get_config_value('post_processing', 'output_to_clipboard')) != enabled:
+            ConfigManager.set_config_value(enabled, 'post_processing', 'output_to_clipboard')
+            try:
+                ConfigManager.save_config()
+            except OSError:
+                logger.exception('Unable to save the clipboard output setting')
+        self._refresh_output_indicators()
+
+    def _copy_to_clipboard(self, text):
+        """Copy text, using wl-copy on native Wayland where Qt needs a focused window."""
+        if QGuiApplication.platformName().startswith('wayland') and shutil.which('wl-copy'):
+            try:
+                subprocess.run(['wl-copy'], input=text.encode('utf-8'), check=True, timeout=5)
+                return
+            except (OSError, subprocess.SubprocessError):
+                logger.exception('wl-copy failed; falling back to the Qt clipboard')
+        self.app.clipboard().setText(text)
 
     def _update_retry_actions(self):
         count = len(self.failed_recordings)
@@ -1237,6 +1316,7 @@ class WhisperWriterApp(QObject):
         model_name = recording[2] if len(recording) > 2 else getattr(self, 'active_model_name', None)
         self._retrying = True
         self._continue_recording = False
+        self._reset_session_output()
         self._start_worker(ResultThread(
             self.local_model,
             audio_data=audio_data,
@@ -1247,7 +1327,8 @@ class WhisperWriterApp(QObject):
     def copy_last_transcript(self):
         """
         Copy the last transcript to the clipboard. Only happens when the user explicitly
-        clicks this tray menu item — the app never touches the clipboard on its own.
+        clicks this tray menu item. Otherwise the app writes to the clipboard only when the
+        user chose clipboard output (tray toggle, setting, or the per-session switch).
         """
         if not self.last_transcript:
             self.tray_icon.showMessage(
@@ -1313,6 +1394,12 @@ class WhisperWriterApp(QObject):
         self.recording_start_sound.volume = toggle_volume
         self.recording_stop_sound.volume = toggle_volume
         self._configure_update_check_timer()
+        if getattr(self, 'output_clipboard_action', None):
+            self.output_clipboard_action.blockSignals(True)
+            self.output_clipboard_action.setChecked(bool(
+                ConfigManager.get_config_value('post_processing', 'output_to_clipboard')))
+            self.output_clipboard_action.blockSignals(False)
+        self._refresh_output_indicators()
 
     def on_settings_closed(self):
         """
@@ -1339,9 +1426,14 @@ class WhisperWriterApp(QObject):
                     self._begin_model_hold('stop')
                 else:
                     self._finish_short_model_press()
+            elif self.current_status == 'transcribing':
+                # Pressing the shortcut again while waiting for the transcript switches
+                # where it goes, so a long transcription need not hold the window focus.
+                self.toggle_session_output()
             return
 
         self._continue_recording = ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous'
+        self._reset_session_output()
         # Every user-started recording begins on the primary model.  The first keypress can
         # still select the secondary model by being held past the short/long threshold.
         self.start_result_thread(reset_selection=True)
@@ -1518,6 +1610,21 @@ class WhisperWriterApp(QObject):
                 'Use Copy Last Transcript to insert it.',
                 QSystemTrayIcon.Information, 8000,
             )
+            return
+
+        if self._output_to_clipboard():
+            # Continuous sessions copy every segment produced so far, not just the latest.
+            separator = ' ' if self._session_clipboard_text and not self._session_clipboard_text[-1].isspace() else ''
+            self._session_clipboard_text += separator + result
+            try:
+                self._copy_to_clipboard(self._session_clipboard_text)
+            except Exception:
+                logger.exception('Unable to copy transcript to the clipboard')
+                self.tray_icon.showMessage('WhisperWriter', 'Copying failed. Use Copy Last Transcript to recover the text.', QSystemTrayIcon.Warning, 5000)
+                return
+            self.tray_icon.showMessage('WhisperWriter', 'Transcript copied to the clipboard.', QSystemTrayIcon.Information, 2000)
+            if ConfigManager.get_config_value('misc', 'noise_on_completion'):
+                self._play_sound(AudioPlayer(os.path.join('assets', 'beep.wav')), block=True)
             return
 
         # Stop listening while typing: pynput's global listener also observes the

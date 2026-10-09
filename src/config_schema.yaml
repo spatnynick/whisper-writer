@@ -134,6 +134,11 @@ recording_options:
 
 # Post-processing options for the transcribed text
 post_processing:
+  output_to_clipboard:
+    value: false
+    type: bool
+    live_reload: true
+    description: "Copy finished transcripts to the clipboard instead of typing them at the cursor. Also available as Output to Clipboard in the tray menu. During a single recording you can switch with the clipboard button in the status popup, or by pressing the activation shortcut again while transcribing."
   writing_key_press_delay:
     value: 0.005
     type: float

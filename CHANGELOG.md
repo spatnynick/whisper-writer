@@ -14,6 +14,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   the switch then lost that recording.
 
 ### Added
+- Clipboard output, so a long transcription no longer has to keep the target window focused:
+  - one-time switch for the current recording: the clipboard button in the status popup (while
+    recording or transcribing), or pressing the activation shortcut again while transcribing;
+    pressing or clicking again switches back to typing;
+  - persistent default: **Output to Clipboard** in the tray menu (saved as
+    `post_processing.output_to_clipboard`, also in Settings → Text output), shown by a clipboard
+    badge on the tray icon.
+  Continuous sessions copy all segments collected since the switch.
 - Settings → About → Application branch: switch this installation to another branch of the
   fork (e.g. to test a pull request before merging) and back to `main`. The tray Update action
   follows the selected branch. `update.sh` gained `--switch BRANCH`, `--list-branches` and

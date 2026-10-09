@@ -880,7 +880,7 @@ class SettingsWindow(BaseWindow):
                 ('Timing', ('silence_duration', 'min_duration'))),
             'post_processing': (
                 ('Text formatting', ('remove_trailing_period', 'add_trailing_space', 'remove_capitalization')),
-                ('Text insertion', ('input_method', 'writing_key_press_delay'))),
+                ('Text insertion', ('output_to_clipboard', 'input_method', 'writing_key_press_delay'))),
             'misc': (
                 ('Status indicators', ('hide_status_window', 'status_window_position', 'show_tray_status_icon')),
                 ('Sounds', ('play_toggle_sounds', 'toggle_sound_volume', 'noise_on_completion')),

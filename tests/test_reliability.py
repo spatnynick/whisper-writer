@@ -1073,6 +1073,102 @@ class ReliabilityTests(unittest.TestCase):
         app.settings_window.discard_and_close.assert_called_once()
         app.result_thread.cancel_recording.assert_not_called()
 
+    def _transcribing_app(self):
+        app = self.app()
+        app._session_output_clipboard = None
+        app._session_clipboard_text = ''
+        app.result_thread = Mock()
+        app.result_thread.isRunning.return_value = True
+        app.result_thread.is_recording = False
+        app.current_status = 'transcribing'
+        return app
+
+    def test_activation_while_transcribing_sends_transcript_to_clipboard(self):
+        app = self._transcribing_app()
+        app.on_activation()
+        self.assertTrue(app._output_to_clipboard())
+        app.result_thread.stop_recording.assert_not_called()
+        with patch.object(app, '_copy_to_clipboard') as copy:
+            app.on_transcription_complete('long transcript')
+        copy.assert_called_once_with('long transcript')
+        app.input_simulator.typewrite.assert_not_called()
+        app.key_listener.stop.assert_not_called()
+        self.assertEqual(app.last_transcript, 'long transcript')
+
+    def test_second_activation_while_transcribing_switches_back_to_typing(self):
+        app = self._transcribing_app()
+        app.on_activation()
+        app.on_activation()
+        with patch.object(app, '_copy_to_clipboard') as copy:
+            app.on_transcription_complete('typed')
+        copy.assert_not_called()
+        app.input_simulator.typewrite.assert_called_once_with('typed')
+
+    def test_clipboard_output_collects_continuous_segments(self):
+        app = self._transcribing_app()
+        app.toggle_session_output()
+        with patch.object(app, '_copy_to_clipboard') as copy:
+            app.on_transcription_complete('First part.')
+            app.on_transcription_complete('Second part.')
+        self.assertEqual(copy.call_args.args[0], 'First part. Second part.')
+
+    def test_new_recording_session_resets_one_time_switch(self):
+        app = self._transcribing_app()
+        app.toggle_session_output()
+        app._session_clipboard_text = 'old'
+        app.result_thread = None
+        app.current_status = 'idle'
+        with patch.object(app, '_start_worker'):
+            app.on_activation()
+        self.assertFalse(app._output_to_clipboard())
+        self.assertEqual(app._session_clipboard_text, '')
+
+    def test_session_switch_ignored_without_running_worker(self):
+        app = self.app()
+        app._session_output_clipboard = None
+        app.toggle_session_output()
+        self.assertIsNone(app._session_output_clipboard)
+
+    def test_persistent_clipboard_setting_is_saved_and_used(self):
+        app = self.app()
+        app._session_output_clipboard = None
+        app._session_clipboard_text = ''
+        with patch.object(ConfigManager, 'save_config') as save:
+            app.set_persistent_output_clipboard(True)
+        save.assert_called_once()
+        self.assertTrue(ConfigManager.get_config_value('post_processing', 'output_to_clipboard'))
+        self.assertIn('Output: clipboard', app.tray_icon.setToolTip.call_args.args[0])
+        with patch.object(app, '_copy_to_clipboard') as copy:
+            app.on_transcription_complete('to clipboard')
+        copy.assert_called_once_with('to clipboard')
+        app.input_simulator.typewrite.assert_not_called()
+
+        # A one-time switch overrides the saved default for the current session only.
+        app.result_thread = Mock()
+        app.result_thread.isRunning.return_value = True
+        app.toggle_session_output()
+        self.assertFalse(app._output_to_clipboard())
+        app._reset_session_output()
+        self.assertTrue(app._output_to_clipboard())
+
+    def test_status_window_clipboard_button_requests_switch(self):
+        from ui.status_window import StatusWindow
+        window = StatusWindow()
+        requested = []
+        window.clipboardToggleRequested.connect(lambda: requested.append(True))
+        window.updateStatus('transcribing')
+        self.assertFalse(window.clipboard_button.isHidden())
+        window.clipboard_button.click()
+        self.assertEqual(requested, [True])
+        # The app confirms the switch; until then the button keeps the real state.
+        self.assertFalse(window.clipboard_button.isChecked())
+        window.set_output_clipboard(True)
+        self.assertTrue(window.clipboard_button.isChecked())
+        self.assertEqual(window.status_label.text(), 'Transcribing... → clipboard')
+        window.updateStatus('idle')
+        self.assertTrue(window.clipboard_button.isHidden())
+        window.deleteLater()
+
     def test_dotool_rejects_command_injection(self):
         simulator = InputSimulator.__new__(InputSimulator)
         simulator.dotool_process = Mock()
